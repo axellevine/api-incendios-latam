@@ -1,0 +1,7 @@
+all countrys/
+server/Country_per_year/
+__pycache__/
+*.csv
+*.zip
+*.pkl
+*.pyc
