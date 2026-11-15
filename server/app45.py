@@ -1,5 +1,6 @@
 import calendar
 from datetime import date, datetime
+import inspect
 import io
 import json
 import os
@@ -10,6 +11,7 @@ import unicodedata
 from urllib.parse import urlparse
 from xml.sax.saxutils import escape as xml_escape
 
+import altair as alt
 import numpy as np
 import pandas as pd
 import pydeck as pdk
@@ -27,6 +29,29 @@ st.set_page_config(
 BASE_DIR = Path(__file__).resolve().parent
 WORLD_GEOJSON_CACHE = BASE_DIR / "world_countries_110m.geojson"
 DEFAULT_API_URL = os.getenv("INCENDIOS_API_URL", "http://127.0.0.1:8000/api/incendios-grid")
+
+# Visible por defecto; puede ocultarse en despliegue público con ?admin=0 o SHOW_SERVER_PANEL=0
+SHOW_SERVER_PANEL = (
+    os.getenv("SHOW_SERVER_PANEL", "1") != "0"
+    and st.query_params.get("admin", "1") != "0"
+)
+
+PAGE_MAP = "🗺️ Mapa"
+PAGE_CAL = "📅 Calendario"
+PAGE_FILT = "🔍 Filtros"
+PAGES = [PAGE_MAP, PAGE_CAL, PAGE_FILT]
+
+
+def _stretch(fn: Any) -> Dict[str, Any]:
+    """Compatibilidad: `width="stretch"` en Streamlit recientes, `use_container_width` en versiones antiguas."""
+    return {"width": "stretch"} if "width" in inspect.signature(fn).parameters else {"use_container_width": True}
+
+
+BTN = _stretch(st.button)
+DL = _stretch(st.download_button)
+DECK = _stretch(st.pydeck_chart)
+DF = _stretch(st.dataframe)
+ALT = _stretch(st.altair_chart)
 
 EARTH_RADIUS_M = 6_371_008.8
 METERS_PER_DEG_LAT = (np.pi / 180.0) * EARTH_RADIUS_M  # ~111,195 m/grado
@@ -73,8 +98,8 @@ ZOOM_TIERS: Dict[int, Dict[str, Any]] = {
         "camera_zoom": 7.3,
     },
     5: {
-        "short": "5 · Sensor 1:1 (~1 km)",
-        "label": "Nivel 5 · Huella Física Sensor 1:1 (~1 km)",
+        "short": "5 · Celda ~1 km",
+        "label": "Nivel 5 · Celda ~1 km",
         "radius_deg": SENSOR_1TO1_RADIUS_DEG,
         "grid_radius": SENSOR_1TO1_RADIUS_DEG,
         "grid_coverage": "axial_clusters",
@@ -84,6 +109,12 @@ ZOOM_TIERS: Dict[int, Dict[str, Any]] = {
 }
 
 THERMAL_PALETTES: Dict[str, Dict[str, Any]] = {
+    "Inferno (apto para daltonismo)": {
+        "stops": np.array([0.0, 0.25, 0.5, 0.75, 1.0]),
+        "r": [0, 87, 188, 249, 252],
+        "g": [0, 16, 55, 142, 255],
+        "b": [4, 110, 84, 9, 164],
+    },
     "Térmico Clásico (Verde → Ámbar → Naranja → Rojo)": {
         "stops": np.array([0.0, 0.35, 0.68, 1.0]),
         "r": [46, 241, 230, 255],
@@ -169,6 +200,7 @@ EXPORT_COLUMNS = [
     "nivel_riesgo",
     "satelite",
     "instrumento",
+    "familia",
 ]
 
 COLUMN_ALIASES: Dict[str, List[str]] = {
@@ -189,11 +221,11 @@ COLUMN_ALIASES: Dict[str, List[str]] = {
 
 # 2. Estado canónico persistente entre páginas
 DEFAULT_STATE: Dict[str, Any] = {
-    "active_page": "🗺️ Grid de Incendios",
+    "active_page": PAGE_MAP,
     "dock_visible": True,
     "api_url": DEFAULT_API_URL,
     "api_token": "",
-    "api_limit": 60000,
+    "api_limit": 120000,
     "allow_local_fallback": True,
     "strict_latam": True,
     "active_pais": "Todos",
@@ -233,15 +265,22 @@ DEFAULT_STATE: Dict[str, Any] = {
     "show_world_map_3d": True,
     "show_graticule_3d": True,
     "show_base_grid": False,
+    "search_nonce": 0,
+    "cal_metric": "Focos",
+    "cal_series": "Media (MODIS y VIIRS)",
+    "cal_focus_year": None,
+    "cal_range_w": None,
 }
 
 for _k, _v in DEFAULT_STATE.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
-is_map_page = st.session_state.active_page == "🗺️ Grid de Incendios"
+if st.session_state.active_page not in PAGES:
+    st.session_state.active_page = PAGE_MAP
+is_map_page = st.session_state.active_page == PAGE_MAP
 
-# 3. Estilos CSS dinámicos según vista activa + Ventana Servidor arriba a la derecha
+# 3. Estilos CSS dinámicos + Indicador flotante de carga + Ventana Servidor
 page_layout_css = (
     """
     .block-container {
@@ -271,6 +310,84 @@ st.markdown(
     <style>
     #MainMenu, footer, header, [data-testid="stSidebar"], [data-testid="collapsedControl"] {{
         display: none !important;
+    }}
+
+    @keyframes spinLoader {{
+        0% {{ transform: rotate(0deg); }}
+        100% {{ transform: rotate(360deg); }}
+    }}
+
+    @keyframes pulseLoaderBorder {{
+        0%, 100% {{ box-shadow: 0 14px 40px rgba(0, 0, 0, 0.72), 0 0 18px rgba(56, 189, 248, 0.22); }}
+        50% {{ box-shadow: 0 14px 40px rgba(0, 0, 0, 0.78), 0 0 28px rgba(251, 146, 60, 0.34); }}
+    }}
+
+    /* Indicador flotante automático en el instante en que Streamlit inicia un rerun */
+    .stApp[data-test-script-state="running"]::after {{
+        content: "⏳ Cargando datos y actualizando vista...";
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 100001;
+        background: rgba(15, 23, 42, 0.94);
+        backdrop-filter: blur(14px);
+        border: 1px solid rgba(56, 189, 248, 0.48);
+        border-radius: 14px;
+        padding: 15px 24px;
+        color: #f8fafc;
+        font-size: 14px;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+        pointer-events: none;
+        animation: pulseLoaderBorder 1.6s ease-in-out infinite;
+    }}
+
+    /* Tarjeta flotante contextual con spinner animado para cada fase de procesamiento */
+    .live-loading-card {{
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 100002;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        background: rgba(15, 23, 42, 0.96);
+        backdrop-filter: blur(16px);
+        border: 1px solid rgba(251, 146, 60, 0.58);
+        border-radius: 14px;
+        padding: 15px 24px;
+        color: #f8fafc;
+        pointer-events: none;
+        min-width: 290px;
+        max-width: 450px;
+        animation: pulseLoaderBorder 1.6s ease-in-out infinite;
+    }}
+
+    .live-loading-spinner {{
+        width: 22px;
+        height: 22px;
+        border: 3px solid rgba(148, 163, 184, 0.25);
+        border-top-color: #fb923c;
+        border-right-color: #38bdf8;
+        border-radius: 50%;
+        flex-shrink: 0;
+        animation: spinLoader 0.8s linear infinite;
+    }}
+
+    .live-loading-title {{
+        font-size: 14px;
+        font-weight: 700;
+        color: #f8fafc;
+        line-height: 1.35;
+    }}
+
+    .live-loading-sub {{
+        font-size: 12px;
+        color: #94a3b8;
+        margin-top: 2px;
+        line-height: 1.3;
     }}
 
     {page_layout_css}
@@ -447,7 +564,9 @@ st.markdown(
 
     /* Pantalla completa exclusiva para el mapa principal (sin capturar el visor dentro de stDialog) */
     section.main .stDeckGlJsonChart,
-    section.main div[data-testid="stDeckGlJsonChart"] {{
+    section.main div[data-testid="stDeckGlJsonChart"],
+    [data-testid="stMain"] .stDeckGlJsonChart,
+    [data-testid="stMain"] div[data-testid="stDeckGlJsonChart"] {{
         height: 100vh !important;
         width: 100vw !important;
         position: fixed !important;
@@ -455,10 +574,38 @@ st.markdown(
         left: 0 !important;
         z-index: 1 !important;
     }}
+    .map-legend {{
+        position: fixed; right: 16px; bottom: 28px; z-index: 9999; width: 290px;
+        background: rgba(17,21,30,0.90); border: 1px solid rgba(255,255,255,0.15); border-radius: 12px;
+        padding: 10px 12px; color: #e5e7eb; font-size: 12px; line-height: 1.35;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+    }}
+    .map-legend .bar {{ height: 10px; border-radius: 6px; margin: 7px 0 2px 0; }}
+    .map-legend .ends {{ display: flex; justify-content: space-between; color: #94a3b8; font-size: 11px; }}
+    .map-legend .note {{ margin-top: 6px; color: #94a3b8; font-size: 11px; }}
     </style>
     """,
     unsafe_allow_html=True,
 )
+
+loading_slot = st.empty()
+
+
+def set_loading_status(title: str, subtitle: str = "") -> None:
+    """Muestra un banner flotante centrado indicando la fase actual de carga."""
+    sub_html = f"<div class='live-loading-sub'>{xml_escape(subtitle)}</div>" if subtitle else ""
+    loading_slot.markdown(
+        f"<div class='live-loading-card'>"
+        f"<div class='live-loading-spinner'></div>"
+        f"<div><div class='live-loading-title'>{xml_escape(title)}</div>{sub_html}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def clear_loading_status() -> None:
+    """Oculta el banner contextual al completar el renderizado de la página."""
+    loading_slot.empty()
 
 
 # 4. Carga del Mapamundi GeoJSON y Geometría Base para el Globo 3D
@@ -552,22 +699,28 @@ def _build_api_headers(api_token: str) -> Dict[str, str]:
     return headers
 
 
-@st.cache_data(ttl=20)
-def fetch_api_catalogs(grid_url: str, api_token: str = "") -> Dict[str, Any]:
+@st.cache_data(ttl=30, show_spinner=False)
+def _fetch_api_catalogs_cached(grid_url: str, api_token: str = "") -> Dict[str, Any]:
     base_url = _derive_base_api_url(grid_url)
+    resp = requests.get(
+        f"{base_url}/api/filtros-disponibles",
+        headers=_build_api_headers(api_token),
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return data if isinstance(data, dict) and data else {}
+
+
+def fetch_api_catalogs(grid_url: str, api_token: str = "") -> Dict[str, Any]:
+    """Consulta el catálogo del backend sin cachear fallos transitorios vacíos."""
     try:
-        resp = requests.get(
-            f"{base_url}/api/filtros-disponibles",
-            headers=_build_api_headers(api_token),
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, dict):
-            return data
+        res = _fetch_api_catalogs_cached(grid_url, api_token)
+        if not res:
+            _fetch_api_catalogs_cached.clear()
+        return res
     except Exception:
-        pass
-    return {}
+        return {}
 
 
 def _extract_records_from_payload(payload: Any) -> List[Dict[str, Any]]:
@@ -597,12 +750,38 @@ def _extract_records_from_payload(payload: Any) -> List[Dict[str, Any]]:
     return []
 
 
+def sensor_family(inst: Any, sat: Any) -> str:
+    """Clasifica cada detección en la familia MODIS (1 km) o VIIRS (375 m)."""
+    i = str(inst).upper()
+    s = str(sat).upper()
+    if "VIIRS" in i:
+        return "VIIRS"
+    if "MODIS" in i:
+        return "MODIS"
+    if any(t in s for t in ("TERRA", "AQUA")):
+        return "MODIS"
+    if any(t in s for t in ("SNPP", "NPP", "N20", "N21", "NOAA", "JPSS")):
+        return "VIIRS"
+    return "Otro"
+
+
+def _apply_geo_bounds(df: pd.DataFrame, strict_latam_bounds: bool) -> pd.DataFrame:
+    if df.empty:
+        return df
+    if strict_latam_bounds:
+        mask = df["lat_grid"].between(LATAM_LAT_MIN, LATAM_LAT_MAX) & df["lon_grid"].between(LATAM_LON_MIN, LATAM_LON_MAX)
+    else:
+        mask = df["lat_grid"].between(-85.0, 85.0) & df["lon_grid"].between(-180.0, 180.0)
+    return df[mask]
+
+
 def _normalize_grid_dataframe(records: List[Dict[str, Any]], strict_latam_bounds: bool = True) -> pd.DataFrame:
+    """Normaliza columnas SIN inventar datos: lo que falta queda vacío o la fila se descarta."""
+    empty = pd.DataFrame(columns=EXPECTED_COLUMNS + ["familia"])
     if not records:
-        return pd.DataFrame(columns=EXPECTED_COLUMNS)
+        return empty
 
     df = pd.DataFrame(records)
-
     lower_cols = {c.lower().strip(): c for c in df.columns}
     for canonical, aliases in COLUMN_ALIASES.items():
         if canonical not in df.columns:
@@ -611,38 +790,122 @@ def _normalize_grid_dataframe(records: List[Dict[str, Any]], strict_latam_bounds
                     df[canonical] = df[lower_cols[alias]]
                     break
 
+    count_provided = "total_incendios" in df.columns
     for col in EXPECTED_COLUMNS:
         if col not in df.columns:
             df[col] = None
 
-    df["pais"] = df["pais"].fillna("LATAM").astype(str).str.strip()
-    df["anio"] = pd.to_numeric(df["anio"], errors="coerce").fillna(2025).astype(int)
-    df["fecha"] = df["fecha"].fillna("").astype(str).str.strip()
+    fecha_dt = pd.to_datetime(df["fecha"], errors="coerce", format="mixed")
+    df["fecha"] = fecha_dt.dt.strftime("%Y-%m-%d").fillna("")
+    df["anio"] = pd.to_numeric(df["anio"], errors="coerce").fillna(fecha_dt.dt.year)
+    df["mes"] = pd.to_numeric(df["mes"], errors="coerce").fillna(fecha_dt.dt.month)
     df["lat_grid"] = pd.to_numeric(df["lat_grid"], errors="coerce")
     df["lon_grid"] = pd.to_numeric(df["lon_grid"], errors="coerce")
-    df["total_incendios"] = pd.to_numeric(df["total_incendios"], errors="coerce").fillna(1).clip(lower=1).astype(int)
-    df["frp_promedio"] = pd.to_numeric(df["frp_promedio"], errors="coerce").fillna(0.0).clip(lower=0.0).round(1)
-    df["brillo_promedio"] = pd.to_numeric(df["brillo_promedio"], errors="coerce").fillna(0.0).clip(lower=0.0).round(1)
-    df["instrumento"] = df["instrumento"].fillna("MODIS").astype(str).str.strip()
-    df["satelite"] = df["satelite"].fillna("Terra").astype(str).str.strip()
-    df["mes"] = pd.to_numeric(df["mes"], errors="coerce").fillna(1).astype(int).clip(1, 12)
-    df["nivel_riesgo"] = df["nivel_riesgo"].fillna("Bajo").astype(str)
-    df["color"] = df["color"].fillna("#2ECC71").astype(str)
+    df["total_incendios"] = pd.to_numeric(df["total_incendios"], errors="coerce") if count_provided else 1.0
+    df["frp_promedio"] = pd.to_numeric(df["frp_promedio"], errors="coerce").clip(lower=0.0).round(1)
+    df["brillo_promedio"] = pd.to_numeric(df["brillo_promedio"], errors="coerce").clip(lower=0.0).round(1)
+    df["pais"] = df["pais"].fillna("Sin dato").astype(str).str.strip()
+    df["instrumento"] = df["instrumento"].fillna("Desconocido").astype(str).str.strip()
+    df["satelite"] = df["satelite"].fillna("Desconocido").astype(str).str.strip()
+    df["nivel_riesgo"] = df["nivel_riesgo"].fillna("Sin clasificar").astype(str)
+    df["color"] = df["color"].fillna("#94A3B8").astype(str)
 
-    df = df.dropna(subset=["lat_grid", "lon_grid"])
+    df = df.dropna(subset=["lat_grid", "lon_grid", "anio", "mes", "total_incendios"])
+    df = df[(df["total_incendios"] > 0) & df["mes"].between(1, 12)]
+    df["anio"] = df["anio"].astype(int)
+    df["mes"] = df["mes"].astype(int)
+    df["total_incendios"] = df["total_incendios"].round().astype(int)
 
-    if strict_latam_bounds:
-        df = df[
-            df["lat_grid"].between(LATAM_LAT_MIN, LATAM_LAT_MAX)
-            & df["lon_grid"].between(LATAM_LON_MIN, LATAM_LON_MAX)
-        ]
-    else:
-        df = df[df["lat_grid"].between(-85.0, 85.0) & df["lon_grid"].between(-180.0, 180.0)]
-
-    return df.reset_index(drop=True)
+    if df.empty:
+        return empty
+    fam_map = {(i, s): sensor_family(i, s) for i, s in df[["instrumento", "satelite"]].drop_duplicates().itertuples(index=False)}
+    df["familia"] = [fam_map[(i, s)] for i, s in zip(df["instrumento"], df["satelite"])]
+    return _apply_geo_bounds(df, strict_latam_bounds).reset_index(drop=True)
 
 
-@st.cache_data(ttl=15)
+def _local_signature() -> tuple:
+    files: List[Path] = []
+    data_dir = BASE_DIR / "datos_locales"
+    if data_dir.is_dir():
+        files += sorted(data_dir.glob("*.csv"))
+    legacy = BASE_DIR / "modis_2025_Argentina.csv"
+    if not legacy.exists():
+        legacy = Path.home() / "Downloads" / "modis_2025_Argentina.csv"
+    if legacy.exists() and legacy not in files:
+        files.append(legacy)
+    return tuple((str(p), p.stat().st_mtime) for p in files)
+
+
+@st.cache_data(show_spinner=False)
+def load_local_firms_grid(signature: tuple) -> pd.DataFrame:
+    """Lee CSV de FIRMS (MODIS y/o VIIRS) y los agrega por DÍA, celda de 0.01° (~1 km), sensor y satélite."""
+    frames = []
+    for path_str, _mtime in signature:
+        path = Path(path_str)
+        try:
+            raw = pd.read_csv(path)
+        except Exception:
+            continue
+        raw.columns = [c.lower().strip() for c in raw.columns]
+        if not {"latitude", "longitude", "acq_date"} <= set(raw.columns):
+            continue
+        nan_col = pd.Series(np.nan, index=raw.index)
+        if "brightness" in raw.columns:
+            bright = raw["brightness"]
+        elif "bright_ti4" in raw.columns:
+            bright = raw["bright_ti4"]
+        else:
+            bright = nan_col
+        if "instrument" in raw.columns:
+            inst = raw["instrument"].astype(str).str.strip()
+        else:
+            inst = pd.Series("VIIRS" if "bright_ti4" in raw.columns else "MODIS", index=raw.index)
+        sat = raw["satellite"].astype(str).str.strip() if "satellite" in raw.columns else pd.Series("Desconocido", index=raw.index)
+        pais = raw["country"].astype(str) if "country" in raw.columns else path.stem.split("_")[-1].capitalize()
+        frames.append(
+            pd.DataFrame(
+                {
+                    "fecha": pd.to_datetime(raw["acq_date"], errors="coerce", format="mixed"),
+                    "lat_grid": raw["latitude"].round(2),
+                    "lon_grid": raw["longitude"].round(2),
+                    "instrumento": inst,
+                    "satelite": sat,
+                    "pais": pais,
+                    "brillo": bright,
+                    "frp": raw["frp"] if "frp" in raw.columns else nan_col,
+                }
+            ).dropna(subset=["fecha", "lat_grid", "lon_grid"])
+        )
+    if not frames:
+        return pd.DataFrame(columns=EXPECTED_COLUMNS + ["familia"])
+
+    allf = pd.concat(frames, ignore_index=True)
+    g = allf.groupby(["fecha", "lat_grid", "lon_grid", "instrumento", "satelite", "pais"], as_index=False).agg(
+        total_incendios=("frp", "size"),
+        frp_promedio=("frp", "mean"),
+        brillo_promedio=("brillo", "mean"),
+    )
+    g["fecha"] = g["fecha"].dt.strftime("%Y-%m-%d")
+    fam = g["instrumento"].combine(g["satelite"], sensor_family)
+    pct = g.groupby(fam)["frp_promedio"].rank(pct=True)
+    g["nivel_riesgo"] = np.select([pct.isna(), pct >= 0.90, pct >= 0.60], ["Sin clasificar", "Alto", "Medio"], default="Bajo")
+    g["color"] = g["nivel_riesgo"].map({"Alto": "#FF0000", "Medio": "#F39C12", "Bajo": "#2ECC71"}).fillna("#94A3B8")
+    return _normalize_grid_dataframe(g.to_dict(orient="records"), strict_latam_bounds=False)
+
+
+def local_catalogs() -> Dict[str, Any]:
+    df = load_local_firms_grid(_local_signature())
+    if df.empty:
+        return {}
+    return {
+        "paises": sorted(df["pais"].unique().tolist()),
+        "anios": sorted(int(a) for a in df["anio"].unique()),
+        "satelites": sorted(df["satelite"].unique().tolist()),
+        "instrumentos": sorted(df["instrumento"].unique().tolist()),
+    }
+
+
+@st.cache_data(ttl=15, show_spinner=False)
 def fetch_incendios_grid(
     api_url: str,
     allow_local_fallback: bool,
@@ -651,9 +914,10 @@ def fetch_incendios_grid(
     mes: Optional[int] = None,
     fecha: Optional[str] = None,
     strict_latam_bounds: bool = True,
-    limit: int = 60000,
+    limit: int = 120000,
     api_token: str = "",
-) -> tuple[pd.DataFrame, bool, str]:
+) -> tuple[pd.DataFrame, bool, str, bool]:
+    """Devuelve (datos, es_api_en_vivo, estado, truncado_por_limite)."""
     params: Dict[str, Any] = {"limit": int(limit)}
     if pais and pais != "Todos":
         params["pais"] = pais
@@ -665,74 +929,71 @@ def fetch_incendios_grid(
         if mes:
             params["mes"] = int(mes)
 
+    if fecha:
+        suffix = f" · {fecha}"
+    elif mes:
+        suffix = f" · {MESES_NOMBRES[mes]} {anio}"
+    else:
+        suffix = f" · Año {anio}"
+
     try:
-        resp = requests.get(
-            api_url.strip(),
-            params=params,
-            timeout=30,
-            headers=_build_api_headers(api_token),
-        )
+        resp = requests.get(api_url.strip(), params=params, timeout=30, headers=_build_api_headers(api_token))
         resp.raise_for_status()
-        payload = resp.json()
-        records = _extract_records_from_payload(payload)
-
+        records = _extract_records_from_payload(resp.json())
         df = _normalize_grid_dataframe(records, strict_latam_bounds=strict_latam_bounds)
-        if fecha:
-            suffix = f" · {fecha}"
-        elif mes:
-            suffix = f" · {MESES_NOMBRES[mes]} {anio}"
-        else:
-            suffix = f" · Año {anio}"
-        return df, True, f"🟢 API EN VIVO ({len(df):,} celdas{suffix})"
+        truncated = len(records) >= int(limit)
+        status = f"🟢 API EN VIVO ({len(df):,} celdas{suffix})"
+        dropped = len(records) - len(df)
+        if dropped > 0:
+            status += f" · {dropped:,} registros descartados (sin coordenadas/fecha/conteo o fuera de rango)"
+        if truncated:
+            status += f" · ⚠️ respuesta TRUNCADA en {int(limit):,} registros: reduce el periodo o sube el límite"
+        return df, True, status, truncated
     except Exception as api_err:
+        empty = pd.DataFrame(columns=EXPECTED_COLUMNS + ["familia"])
         if not allow_local_fallback:
-            return pd.DataFrame(columns=EXPECTED_COLUMNS), False, f"🔴 API OFFLINE: {api_err}"
+            return empty, False, f"🔴 API OFFLINE: {api_err}", False
+        local = load_local_firms_grid(_local_signature())
+        if local.empty:
+            return empty, False, f"🔴 Sin conexión y sin CSV local ({api_err})", False
+        df = _apply_geo_bounds(local, strict_latam_bounds)
+        if pais and pais != "Todos":
+            df = df[df["pais"].str.lower() == pais.lower()]
+        if fecha:
+            df = df[df["fecha"] == fecha]
+        else:
+            if anio:
+                df = df[df["anio"] == int(anio)]
+            if mes:
+                df = df[df["mes"] == int(mes)]
+        return df.reset_index(drop=True), False, f"🟠 MODO LOCAL ({len(df):,} celdas{suffix}) · API no disponible: {api_err}", False
 
-        local_csv = BASE_DIR / "modis_2025_Argentina.csv"
-        if not local_csv.exists():
-            local_csv = Path.home() / "Downloads" / "modis_2025_Argentina.csv"
 
-        if local_csv.exists():
-            raw = pd.read_csv(local_csv)
-            parsed_dates = pd.to_datetime(raw["acq_date"], format="mixed", dayfirst=False, errors="coerce")
-            raw["mes"] = parsed_dates.dt.month.fillna(1).astype(int)
-            raw["anio"] = parsed_dates.dt.year.fillna(2025).astype(int)
-            raw["fecha"] = parsed_dates.dt.strftime("%Y-%m-%d").fillna("2025-01-01")
-            raw["lat_grid"] = raw["latitude"].round(2)
-            raw["lon_grid"] = raw["longitude"].round(2)
-
-            grouped = (
-                raw.groupby(["anio", "lat_grid", "lon_grid", "instrument", "satellite", "mes"], as_index=False)
-                .agg(
-                    total_incendios=("brightness", "count"),
-                    frp_promedio=("frp", "mean"),
-                    brillo_promedio=("brightness", "mean"),
-                    fecha=("fecha", "max"),
-                )
-                .rename(columns={"instrument": "instrumento", "satellite": "satelite"})
-            )
-            grouped["pais"] = "Argentina"
-            grouped["frp_promedio"] = grouped["frp_promedio"].round(1)
-            grouped["brillo_promedio"] = grouped["brillo_promedio"].round(1)
-
-            cond_alto = (grouped["total_incendios"] >= 10) | (grouped["brillo_promedio"] >= 355.0)
-            cond_medio = (grouped["total_incendios"] >= 4) | (grouped["brillo_promedio"] >= 330.0)
-
-            grouped["nivel_riesgo"] = np.select([cond_alto, cond_medio], ["Alto", "Medio"], default="Bajo")
-            grouped["color"] = np.select([cond_alto, cond_medio], ["#FF0000", "#F39C12"], default="#2ECC71")
-
-            df = _normalize_grid_dataframe(
-                grouped.to_dict(orient="records"), strict_latam_bounds=strict_latam_bounds
-            )
-            if pais and pais != "Todos":
-                df = df[df["pais"].str.lower() == pais.lower()].reset_index(drop=True)
-            if fecha:
-                df = df[df["fecha"] == fecha].reset_index(drop=True)
-            elif mes:
-                df = df[df["mes"] == mes].reset_index(drop=True)
-            return df, False, f"🟠 MODO LOCAL (Error API: {api_err})"
-
-        return pd.DataFrame(columns=EXPECTED_COLUMNS), False, f"🔴 Sin conexión y sin CSV local ({api_err})"
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_history(
+    api_url: str,
+    allow_local_fallback: bool,
+    pais: Optional[str],
+    years: tuple,
+    strict_latam_bounds: bool,
+    limit: int,
+    api_token: str,
+) -> tuple[pd.DataFrame, bool, tuple]:
+    """Carga varios años (una consulta por año). Devuelve (datos, hubo_api_en_vivo, años_truncados)."""
+    frames, truncated_years, live_any = [], [], False
+    for y in years:
+        df_y, live, _status, trunc = fetch_incendios_grid(
+            api_url, allow_local_fallback, pais=pais, anio=int(y), mes=None, fecha=None,
+            strict_latam_bounds=strict_latam_bounds, limit=limit, api_token=api_token,
+        )
+        if not df_y.empty:
+            frames.append(df_y)
+        live_any = live_any or live
+        if trunc:
+            truncated_years.append(int(y))
+    if frames:
+        return pd.concat(frames, ignore_index=True), live_any, tuple(truncated_years)
+    return pd.DataFrame(columns=EXPECTED_COLUMNS + ["familia"]), live_any, tuple(truncated_years)
 
 
 # 6. Motor de Reconocimiento Inteligente de Búsqueda
@@ -799,6 +1060,10 @@ def parse_and_apply_smart_search(
     st.session_state.frp_max = None
     st.session_state.brillo_min = None
     st.session_state.brillo_max = None
+    st.session_state.active_sat = None
+    st.session_state.active_inst = None
+    st.session_state.active_riesgo = None
+    st.session_state.active_pais = "Todos"
 
     if not cleaned:
         st.session_state.last_parsed_entities = []
@@ -896,19 +1161,27 @@ def parse_and_apply_smart_search(
             _mark_span(*m.span())
             break
 
+    if exact_date_parsed is not None and exact_date_parsed.year not in available_anios:
+        detected.append({"tipo": "Fecha sin datos", "valor": exact_date_parsed.isoformat(), "color": "#f87171"})
+        exact_date_parsed = None
+
     detected_year: Optional[int] = exact_date_parsed.year if exact_date_parsed else None
     if detected_year is None:
-        for ym in re.finditer(r"\b(20[12]\d)\b", norm_query):
+        for ym in re.finditer(r"\b(20\d{2})\b", norm_query):
             if not any(ym.start() >= s and ym.end() <= e for s, e in consumed_spans):
                 cand_year = int(ym.group(1))
-                if cand_year in available_anios or 2015 <= cand_year <= 2030:
+                if 2000 <= cand_year <= date.today().year:
                     detected_year = cand_year
                     _mark_span(*ym.span())
                     break
 
     if detected_year is not None:
-        st.session_state.cal_anio = detected_year
-        detected.append({"tipo": "Año", "valor": str(detected_year), "color": "#a78bfa"})
+        if detected_year in available_anios:
+            st.session_state.cal_anio = detected_year
+            detected.append({"tipo": "Año", "valor": str(detected_year), "color": "#a78bfa"})
+        else:
+            detected.append({"tipo": "Año sin datos", "valor": str(detected_year), "color": "#f87171"})
+            detected_year = None
 
     detected_month: Optional[int] = exact_date_parsed.month if exact_date_parsed else None
     if detected_month is None:
@@ -918,6 +1191,10 @@ def parse_and_apply_smart_search(
                 detected_month = MONTH_ALIASES[m_alias]
                 _mark_span(*m.span())
                 break
+
+    full_year_match = re.search(r"\b(ano completo|anio completo|todo el ano|todo el anio|anual)\b", norm_query)
+    if full_year_match:
+        _mark_span(*full_year_match.span())
 
     if detected_month is not None:
         st.session_state.cal_mes = detected_month
@@ -943,7 +1220,7 @@ def parse_and_apply_smart_search(
                     break
         if not day_found:
             st.session_state.temporal_mode = "mes_completo"
-    elif re.search(r"\b(ano completo|anio completo|todo el ano|todo el anio|anual)\b", norm_query):
+    elif full_year_match:
         st.session_state.temporal_mode = "anio_completo"
         detected.append({"tipo": "Periodo", "valor": "Año completo", "color": "#c084fc"})
     elif detected_year is not None and detected_month is None:
@@ -1079,7 +1356,7 @@ def build_circular_brush_polygon(
 @st.cache_data
 def build_static_clickable_mesh() -> pd.DataFrame:
     """Construye una rejilla pickable 100% estática (no cambia al mover el marcador ni al variar el radio)."""
-    step = 0.25
+    step = 0.5
     half = step * 0.5
     lats = np.arange(-58.0, 35.5, step)
     lons = np.arange(-122.0, -30.0, step)
@@ -1102,7 +1379,7 @@ def build_static_clickable_mesh() -> pd.DataFrame:
             "polygon": polys,
             "lat": np.round(glat, 3).tolist(),
             "lon": np.round(glon, 3).tolist(),
-            "info": ["Cuadrícula 0.25° (~27 km)"] * len(glat),
+            "info": ["Cuadrícula 0.5° (~55 km)"] * len(glat),
         }
     )
 
@@ -1130,6 +1407,14 @@ def _sync_vertex_inputs() -> None:
     st.session_state.picked_lon_2d = lon_val
     st.session_state["dlg_brush_lat"] = lat_val
     st.session_state["dlg_brush_lon"] = lon_val
+
+
+def _wavg(values: Any, weights: Any) -> float:
+    """Promedio ponderado que ignora valores faltantes (NaN) en vez de propagarlos."""
+    v = np.asarray(values, dtype=np.float64)
+    w = np.asarray(weights, dtype=np.float64)
+    m = np.isfinite(v) & np.isfinite(w)
+    return float(np.average(v[m], weights=w[m])) if m.any() and w[m].sum() > 0 else float("nan")
 
 
 # 6C. Utilidades de Exportación de Registros Filtrados (CSV, Excel, GeoJSON)
@@ -1211,8 +1496,8 @@ def convert_df_to_excel_bytes(df: pd.DataFrame, resumen_meta: Dict[str, Any]) ->
     total_incendios = int(export_df["total_incendios"].sum()) if total_celdas > 0 else 0
     if total_celdas > 0 and total_incendios > 0:
         w = export_df["total_incendios"].to_numpy(dtype=np.float64)
-        brillo_pond = round(float(np.average(export_df["brillo_promedio"], weights=w)), 2)
-        frp_pond = round(float(np.average(export_df["frp_promedio"], weights=w)), 2)
+        brillo_pond = round(_wavg(export_df["brillo_promedio"], w), 2)
+        frp_pond = round(_wavg(export_df["frp_promedio"], w), 2)
     else:
         brillo_pond = 0.0
         frp_pond = 0.0
@@ -1335,6 +1620,16 @@ def convert_df_to_geojson_bytes(
     return json.dumps(feature_collection, ensure_ascii=False, indent=2).encode("utf-8")
 
 
+@st.cache_data(show_spinner=False, max_entries=6)
+def build_export_payload(fmt: str, df: pd.DataFrame, meta: Dict[str, Any], polygon: Optional[List[List[float]]]) -> tuple:
+    """Genera SOLO el formato pedido y lo cachea por filtros."""
+    if fmt == "CSV":
+        return convert_df_to_csv_bytes(df), "csv", "text/csv"
+    if fmt == "Excel":
+        return convert_df_to_excel_bytes(df, meta)
+    return convert_df_to_geojson_bytes(df, meta, polygon), "geojson", "application/geo+json"
+
+
 # 7. Campo Térmico Continuo y Mallas Hexagonales
 def _normalize_percentile(arr: np.ndarray) -> np.ndarray:
     clean = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
@@ -1354,8 +1649,8 @@ def compute_smoothed_thermal_field(
     counts: np.ndarray,
     smooth_weight: float = 0.35,
 ) -> np.ndarray:
-    t_bright = _normalize_percentile(brightness)
-    t_frp = _normalize_percentile(np.log1p(np.maximum(frp, 0.0)))
+    t_bright = _normalize_percentile(_fill_median(brightness))
+    t_frp = _normalize_percentile(_fill_median(np.log1p(np.maximum(frp, 0.0))))
     t_count = _normalize_percentile(np.log1p(np.maximum(counts, 0.0)))
 
     raw_heat = np.nan_to_num(0.45 * t_bright + 0.30 * t_frp + 0.25 * t_count, nan=0.25)
@@ -1405,9 +1700,34 @@ def thermal_values_to_rgba(
     return fill_rgba, line_rgba
 
 
-def _lonlat_to_axial_bins(lons: np.ndarray, lats: np.ndarray, radius_deg: float) -> tuple[np.ndarray, np.ndarray]:
-    q = (2.0 / 3.0) * lons / radius_deg
-    r = (-lons / 3.0 + (np.sqrt(3.0) / 3.0) * lats) / radius_deg
+_HEX_ANGLES = np.deg2rad(np.arange(0, 360, 60))
+
+
+def _fill_median(arr: np.ndarray) -> np.ndarray:
+    """Rellena NaN con la mediana (neutro) para que un dato faltante no se lea como 'frío'."""
+    a = np.asarray(arr, dtype=np.float64)
+    finite = np.isfinite(a)
+    if not finite.any():
+        return np.zeros_like(a)
+    return np.where(finite, a, np.median(a[finite]))
+
+
+def _hex_ring_coords(c_lons, c_lats, radius_deg, lon_scale, is_globe, altitude_m):
+    v_lons = c_lons[:, None] + (radius_deg / lon_scale) * np.cos(_HEX_ANGLES)[None, :]
+    v_lats = np.clip(c_lats[:, None] + radius_deg * np.sin(_HEX_ANGLES)[None, :], -85.0, 85.0)
+    if is_globe:
+        coords = np.stack([v_lons, v_lats, np.full_like(v_lons, float(altitude_m))], axis=-1)
+    else:
+        coords = np.stack([v_lons, v_lats], axis=-1)
+    return coords.round(5).tolist()
+
+
+def _lonlat_to_axial_bins(lons: np.ndarray, lats: np.ndarray, radius_deg: float, lon_scale: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
+    """Bins hexagonales en un plano con la longitud escalada por cos(lat_ref): hexágonos ~regulares en km."""
+    x = np.asarray(lons, dtype=np.float64) * lon_scale
+    y = np.asarray(lats, dtype=np.float64)
+    q = (2.0 / 3.0) * x / radius_deg
+    r = (-x / 3.0 + (np.sqrt(3.0) / 3.0) * y) / radius_deg
     s = -q - r
 
     qi = np.round(q)
@@ -1434,16 +1754,13 @@ def build_regional_or_globe_geodesic_grid(
     lat_max: float = 82.0,
     is_globe: bool = False,
     globe_altitude_m: float = 1200.0,
+    lon_scale: float = 1.0,
 ) -> pd.DataFrame:
     dx = 1.5 * radius_deg
     dy = np.sqrt(3.0) * radius_deg
 
-    q_min = int(np.floor(lon_min / dx))
-    q_max = int(np.ceil(lon_max / dx))
-    qs = np.arange(q_min, q_max + 1, dtype=np.int64)
-
-    q_list = []
-    r_list = []
+    qs = np.arange(int(np.floor(lon_min * lon_scale / dx)), int(np.ceil(lon_max * lon_scale / dx)) + 1, dtype=np.int64)
+    q_list, r_list = [], []
     for q_val in qs:
         r_min = int(np.floor((lat_min / dy) - (q_val / 2.0)))
         r_max = int(np.ceil((lat_max / dy) - (q_val / 2.0)))
@@ -1453,25 +1770,11 @@ def build_regional_or_globe_geodesic_grid(
 
     q_arr = np.concatenate(q_list)
     r_arr = np.concatenate(r_list)
-
-    c_lons = dx * q_arr.astype(np.float64)
+    c_lons = dx * q_arr.astype(np.float64) / lon_scale
     c_lats = dy * (r_arr.astype(np.float64) + q_arr.astype(np.float64) / 2.0)
 
     valid = (c_lons >= lon_min) & (c_lons <= lon_max) & (c_lats >= lat_min) & (c_lats <= lat_max)
-    c_lons = c_lons[valid]
-    c_lats = c_lats[valid]
-
-    angles = np.deg2rad(np.arange(0, 360, 60))
-    v_lons = c_lons[:, None] + radius_deg * np.cos(angles)[None, :]
-    v_lats = np.clip(c_lats[:, None] + radius_deg * np.sin(angles)[None, :], -85.0, 85.0)
-
-    if is_globe:
-        v_alts = np.full_like(v_lons, float(globe_altitude_m))
-        coords = np.stack([v_lons, v_lats, v_alts], axis=-1).round(5).tolist()
-    else:
-        coords = np.stack([v_lons, v_lats], axis=-1).round(5).tolist()
-
-    return pd.DataFrame({"polygon": coords})
+    return pd.DataFrame({"polygon": _hex_ring_coords(c_lons[valid], c_lats[valid], radius_deg, lon_scale, is_globe, globe_altitude_m)})
 
 
 @st.cache_data
@@ -1485,28 +1788,12 @@ def build_matched_geodesic_grid(
     block_size: int = 24,
     is_globe: bool = False,
     globe_altitude_m: float = 1200.0,
+    lon_scale: float = 1.0,
 ) -> pd.DataFrame:
     if coverage_mode == "globe":
-        return build_regional_or_globe_geodesic_grid(
-            radius_deg=radius_deg,
-            lon_min=-180.0,
-            lon_max=180.0,
-            lat_min=-82.0,
-            lat_max=82.0,
-            is_globe=is_globe,
-            globe_altitude_m=globe_altitude_m,
-        )
-
+        return build_regional_or_globe_geodesic_grid(radius_deg, -180.0, 180.0, -82.0, 82.0, is_globe, globe_altitude_m, lon_scale)
     if coverage_mode == "latam":
-        return build_regional_or_globe_geodesic_grid(
-            radius_deg=radius_deg,
-            lon_min=-125.0,
-            lon_max=-30.0,
-            lat_min=-60.0,
-            lat_max=36.0,
-            is_globe=is_globe,
-            globe_altitude_m=globe_altitude_m,
-        )
+        return build_regional_or_globe_geodesic_grid(radius_deg, -125.0, -30.0, -60.0, 36.0, is_globe, globe_altitude_m, lon_scale)
 
     if len(data_lons) > 0:
         all_lons = np.append(data_lons, center_lon)
@@ -1515,7 +1802,7 @@ def build_matched_geodesic_grid(
         all_lons = np.array([center_lon], dtype=np.float64)
         all_lats = np.array([center_lat], dtype=np.float64)
 
-    qi, ri = _lonlat_to_axial_bins(all_lons, all_lats, radius_deg)
+    qi, ri = _lonlat_to_axial_bins(all_lons, all_lats, radius_deg, lon_scale)
     bq = np.floor_divide(qi, block_size)
     br = np.floor_divide(ri, block_size)
 
@@ -1532,7 +1819,7 @@ def build_matched_geodesic_grid(
             for dbr in (-1, 0, 1):
                 expanded_set.add((ubq + dbq, ubr + dbr))
 
-    cq, cr = _lonlat_to_axial_bins(np.array([center_lon]), np.array([center_lat]), radius_deg)
+    cq, cr = _lonlat_to_axial_bins(np.array([center_lon]), np.array([center_lat]), radius_deg, lon_scale)
     cbq, cbr = int(cq[0] // block_size), int(cr[0] // block_size)
     for dbq in range(-3, 4):
         for dbr in range(-2, 3):
@@ -1555,24 +1842,15 @@ def build_matched_geodesic_grid(
 
     dx = 1.5 * radius_deg
     dy = np.sqrt(3.0) * radius_deg
-    c_lons = dx * q_arr.astype(np.float64)
+    c_lons = dx * q_arr.astype(np.float64) / lon_scale
     c_lats = dy * (r_arr.astype(np.float64) + q_arr.astype(np.float64) / 2.0)
 
     valid_mask = (c_lats >= -82.0) & (c_lats <= 82.0) & (c_lons >= -180.0) & (c_lons <= 180.0)
-    c_lons = c_lons[valid_mask]
-    c_lats = c_lats[valid_mask]
+    return pd.DataFrame({"polygon": _hex_ring_coords(c_lons[valid_mask], c_lats[valid_mask], radius_deg, lon_scale, is_globe, globe_altitude_m)})
 
-    angles = np.deg2rad(np.arange(0, 360, 60))
-    v_lons = c_lons[:, None] + radius_deg * np.cos(angles)[None, :]
-    v_lats = np.clip(c_lats[:, None] + radius_deg * np.sin(angles)[None, :], -85.0, 85.0)
 
-    if is_globe:
-        v_alts = np.full_like(v_lons, float(globe_altitude_m))
-        coords = np.stack([v_lons, v_lats, v_alts], axis=-1).round(5).tolist()
-    else:
-        coords = np.stack([v_lons, v_lats], axis=-1).round(5).tolist()
-
-    return pd.DataFrame({"polygon": coords})
+def _fmt_or_na(arr: np.ndarray, suffix: str) -> List[str]:
+    return ["s/d" if not np.isfinite(v) else f"{v:.1f} {suffix}" for v in arr]
 
 
 @st.cache_data
@@ -1585,117 +1863,272 @@ def build_clustered_hex_layer(
     is_globe: bool = False,
     is_sensor_1to1: bool = False,
     globe_altitude_m: float = 1210.0,
+    lon_scale: float = 1.0,
 ) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
     x = df["lon_grid"].to_numpy(dtype=np.float64)
     y = df["lat_grid"].to_numpy(dtype=np.float64)
-    qi, ri = _lonlat_to_axial_bins(x, y, radius_deg)
+    qi, ri = _lonlat_to_axial_bins(x, y, radius_deg, lon_scale)
 
     fires = df["total_incendios"].to_numpy(dtype=np.float64)
+    b = df["brillo_promedio"].to_numpy(dtype=np.float64)
+    f = df["frp_promedio"].to_numpy(dtype=np.float64)
+    fam = df["familia"].to_numpy() if "familia" in df.columns else np.full(len(df), "Otro")
+    vb, vf = np.isfinite(b), np.isfinite(f)
+
     work = pd.DataFrame(
         {
             "q_bin": qi,
             "r_bin": ri,
-            "total_incendios": df["total_incendios"].to_numpy(dtype=np.int64),
-            "w_brillo": df["brillo_promedio"].to_numpy(dtype=np.float64) * fires,
-            "w_frp": df["frp_promedio"].to_numpy(dtype=np.float64) * fires,
+            "total_incendios": fires,
+            "w_brillo": np.where(vb, b * fires, 0.0),
+            "n_brillo": np.where(vb, fires, 0.0),
+            "w_frp": np.where(vf, f * fires, 0.0),
+            "n_frp": np.where(vf, fires, 0.0),
             "celdas": 1,
+            "n_modis": np.where(fam == "MODIS", fires, 0.0),
+            "n_viirs": np.where(fam == "VIIRS", fires, 0.0),
             "instrumento": df["instrumento"].to_numpy(),
             "satelite": df["satelite"].to_numpy(),
             "pais": df["pais"].to_numpy(),
         }
     )
-
-    agg = work.groupby(["q_bin", "r_bin"], as_index=False).agg(
+    keys = ["q_bin", "r_bin"]
+    agg = work.groupby(keys).agg(
         total_incendios=("total_incendios", "sum"),
         w_brillo=("w_brillo", "sum"),
+        n_brillo=("n_brillo", "sum"),
         w_frp=("w_frp", "sum"),
+        n_frp=("n_frp", "sum"),
         celdas_agrupadas=("celdas", "sum"),
-        instrumento=("instrumento", "first"),
-        satelite=("satelite", "first"),
-        pais=("pais", "first"),
+        n_modis=("n_modis", "sum"),
+        n_viirs=("n_viirs", "sum"),
     )
+    for col in ("instrumento", "satelite", "pais"):
+        agg[col] = work[keys + [col]].drop_duplicates().sort_values(col).groupby(keys)[col].agg(" + ".join)
+    agg = agg.reset_index()
 
     q_arr = agg["q_bin"].to_numpy(dtype=np.int64)
     r_arr = agg["r_bin"].to_numpy(dtype=np.int64)
-    c_lons = radius_deg * 1.5 * q_arr.astype(np.float64)
-    c_lats = np.clip(
-        radius_deg * np.sqrt(3.0) * (r_arr.astype(np.float64) + q_arr.astype(np.float64) / 2.0),
-        -84.0,
-        84.0,
-    )
+    c_lons = radius_deg * 1.5 * q_arr.astype(np.float64) / lon_scale
+    c_lats = np.clip(radius_deg * np.sqrt(3.0) * (r_arr.astype(np.float64) + q_arr.astype(np.float64) / 2.0), -84.0, 84.0)
 
-    counts_arr = agg["total_incendios"].to_numpy(dtype=np.int64)
-    brillo_arr = (agg["w_brillo"].to_numpy(dtype=np.float64) / counts_arr).round(1)
-    frp_arr = (agg["w_frp"].to_numpy(dtype=np.float64) / counts_arr).round(1)
+    counts_arr = agg["total_incendios"].to_numpy(dtype=np.float64)
+    nb = agg["n_brillo"].to_numpy(dtype=np.float64)
+    nf = agg["n_frp"].to_numpy(dtype=np.float64)
+    brillo_arr = np.where(nb > 0, agg["w_brillo"].to_numpy() / np.maximum(nb, 1e-9), np.nan).round(1)
+    frp_arr = np.where(nf > 0, agg["w_frp"].to_numpy() / np.maximum(nf, 1e-9), np.nan).round(1)
 
-    heat_vals = compute_smoothed_thermal_field(
-        q_arr, r_arr, brillo_arr, frp_arr, counts_arr.astype(np.float64), smooth_weight=smooth_weight
-    )
+    heat_vals = compute_smoothed_thermal_field(q_arr, r_arr, brillo_arr, frp_arr, counts_arr, smooth_weight=smooth_weight)
     fill_rgba, line_rgba = thermal_values_to_rgba(heat_vals, palette_name=palette_name)
 
-    nivel_termico = np.select(
-        [heat_vals >= 0.72, heat_vals >= 0.42],
-        ["Crítico / Alto", "Moderado / Medio"],
-        default="Bajo / Periférico",
-    )
-
-    angles = np.deg2rad(np.arange(0, 360, 60))
-    cos_a = np.cos(angles)
-    sin_a = np.sin(angles)
-
-    v_lons = c_lons[:, None] + radius_deg * cos_a[None, :]
-    v_lats = np.clip(c_lats[:, None] + radius_deg * sin_a[None, :], -85.0, 85.0)
-
-    if is_globe:
-        v_alts = np.full_like(v_lons, float(globe_altitude_m))
-        coords = np.stack([v_lons, v_lats, v_alts], axis=-1).round(5).tolist()
-    else:
-        coords = np.stack([v_lons, v_lats], axis=-1).round(5).tolist()
+    nivel = np.select([heat_vals >= 0.72, heat_vals >= 0.42], ["Alta (relativa)", "Media (relativa)"], default="Baja (relativa)")
 
     km_per_deg = METERS_PER_DEG_LAT / 1000.0
     area_km2 = np.maximum(
-        0.1, ((3.0 * np.sqrt(3.0) / 2.0) * ((radius_deg * km_per_deg) ** 2) * np.cos(np.deg2rad(c_lats)))
+        0.1, (3.0 * np.sqrt(3.0) / 2.0) * ((radius_deg * km_per_deg) ** 2) * np.cos(np.deg2rad(c_lats)) / lon_scale
     ).round(2)
     diam_km = round(2.0 * radius_deg * km_per_deg, 2)
 
-    max_count = max(int(counts_arr.max()), 1)
+    max_count = max(float(counts_arr.max()), 1.0)
     max_elev = 40_000.0 if is_sensor_1to1 else 180_000.0
-    elevations = ((counts_arr / max_count) * max_elev).round(0).tolist()
     n = len(agg)
-
-    res_label = ["1 km × 1 km (Celda 1:1)"] * n if is_sensor_1to1 else [f"Clúster Ø ~{diam_km} km"] * n
+    res_label = ["Hexágono ≈1 km² (celdas de ~1 km)"] * n if is_sensor_1to1 else [f"Clúster Ø ~{diam_km} km"] * n
 
     return pd.DataFrame(
         {
-            "polygon": coords,
+            "polygon": _hex_ring_coords(c_lons, c_lats, radius_deg, lon_scale, is_globe, globe_altitude_m),
             "rgba": fill_rgba.tolist(),
             "line_rgba": line_rgba.tolist(),
-            "elevation": elevations,
+            "elevation": ((counts_arr / max_count) * max_elev).round(0).tolist(),
             "escala_vista": [tier_label] * n,
             "pais": agg["pais"].tolist(),
             "lat_grid": np.round(c_lats, 4).tolist(),
             "lon_grid": np.round(c_lons, 4).tolist(),
-            "total_incendios": counts_arr.tolist(),
+            "total_incendios": counts_arr.round().astype(np.int64).tolist(),
+            "n_modis": agg["n_modis"].round().astype(np.int64).tolist(),
+            "n_viirs": agg["n_viirs"].round().astype(np.int64).tolist(),
             "celdas_agrupadas": agg["celdas_agrupadas"].tolist(),
-            "frp_promedio": frp_arr.tolist(),
-            "brillo_promedio": brillo_arr.tolist(),
+            "frp_promedio": np.nan_to_num(frp_arr, nan=0.0).tolist(),
+            "brillo_promedio": np.nan_to_num(brillo_arr, nan=0.0).tolist(),
+            "frp_txt": _fmt_or_na(frp_arr, "MW"),
+            "brillo_txt": _fmt_or_na(brillo_arr, "K"),
             "indice_termico": np.round(heat_vals * 100.0, 1).tolist(),
             "instrumento": agg["instrumento"].tolist(),
             "satelite": agg["satelite"].tolist(),
-            "nivel_riesgo": nivel_termico.tolist(),
+            "nivel_intensidad": nivel.tolist(),
             "resolucion_m": res_label,
             "area_km2": area_km2.tolist(),
         }
     )
 
 
+# 7B. ANÁLISIS TEMPORAL: CALENDARIO DE ACTIVIDAD, ARMONIZACIÓN MODIS↔VIIRS Y ANOMALÍAS
+MIN_SOLAPE_PERIODOS = 8      # periodos con ambos sensores activos para estimar la razón
+MIN_ANIOS_REFERENCIA = 3     # años de referencia para definir "lo normal"
+Z_CRITICO = 2.0              # umbral de anomalía (desviaciones estándar en escala log)
+
+SERIE_MODIS = "MODIS"
+SERIE_VIIRS_CONV = "VIIRS (formato MODIS)"
+SERIE_MEDIA = "Media (MODIS y VIIRS)"
+
+
+def prepare_history(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+    """Añade el índice temporal: semana del año (si hay fecha diaria) o mes (si solo hay mes)."""
+    if df.empty:
+        return df.assign(t_anio=pd.Series(dtype=int), t_idx=pd.Series(dtype=int)), "semanal"
+    fdt = pd.to_datetime(df["fecha"], errors="coerce")
+    if fdt.notna().mean() >= 0.5:
+        out = df[fdt.notna()].copy()
+        fdt = fdt[fdt.notna()]
+        out["t_anio"] = fdt.dt.year.to_numpy()
+        out["t_idx"] = ((fdt.dt.dayofyear.to_numpy() - 1) // 7 + 1).astype(int)
+        return out, "semanal"
+    out = df.copy()
+    out["t_anio"] = out["anio"]
+    out["t_idx"] = out["mes"]
+    return out, "mensual"
+
+
+def period_start(anio: Any, idx: Any, gran: str) -> pd.Timestamp:
+    if gran == "semanal":
+        return pd.Timestamp(year=int(anio), month=1, day=1) + pd.Timedelta(days=(int(idx) - 1) * 7)
+    return pd.Timestamp(year=int(anio), month=int(idx), day=1)
+
+
+def period_end(anio: Any, idx: Any, gran: str) -> pd.Timestamp:
+    start = period_start(anio, idx, gran)
+    if gran == "semanal":
+        return min(start + pd.Timedelta(days=6), pd.Timestamp(year=int(anio), month=12, day=31))
+    return start + pd.offsets.MonthEnd(0)
+
+
+def aggregate_series(df: pd.DataFrame, metric: str) -> pd.DataFrame:
+    """Suma por familia de sensor × año × periodo. Nunca mezcla MODIS con VIIRS."""
+    if df.empty:
+        return pd.DataFrame(columns=["familia", "anio", "idx", "valor"])
+    w = df["total_incendios"].to_numpy(dtype=np.float64)
+    if metric.startswith("FRP"):
+        frp = df["frp_promedio"].to_numpy(dtype=np.float64)
+        val = np.where(np.isfinite(frp), frp * w, 0.0)
+    else:
+        val = w
+    tmp = pd.DataFrame({"familia": df["familia"].to_numpy(), "anio": df["t_anio"].to_numpy(), "idx": df["t_idx"].to_numpy(), "valor": val})
+    tmp = tmp[tmp["familia"].isin(["MODIS", "VIIRS"])]
+    return tmp.groupby(["familia", "anio", "idx"], as_index=False)["valor"].sum()
+
+
+def fill_missing_periods(series: pd.DataFrame) -> pd.DataFrame:
+    """La API solo devuelve celdas con fuego: un periodo sin filas es CERO real, pero solo desde que
+    el sensor existe (primer año con datos) y solo hasta el último periodo observado de cada año."""
+    if series.empty:
+        return series
+    cut = series.groupby("anio")["idx"].max()
+    frames = []
+    for fam, g in series.groupby("familia"):
+        first = int(g["anio"].min())
+        rows = [(int(a), i) for a, c in cut.items() if int(a) >= first for i in range(1, int(c) + 1)]
+        base = pd.DataFrame(rows, columns=["anio", "idx"])
+        base["familia"] = fam
+        merged = base.merge(g, on=["familia", "anio", "idx"], how="left")
+        merged["valor"] = merged["valor"].fillna(0.0)
+        frames.append(merged)
+    return pd.concat(frames, ignore_index=True)
+
+
+def harmonize_to_modis(series: pd.DataFrame) -> tuple[Dict[str, pd.DataFrame], Dict[str, Any]]:
+    """Construye las 3 series comparables en escala MODIS:
+    1) MODIS observado
+    2) VIIRS transformado a formato MODIS (VIIRS × razón mediana MODIS/VIIRS)
+    3) Media entre ambos (MODIS y VIIRS transformado)
+    """
+    info: Dict[str, Any] = {"ok": False, "has_ratio": False, "ratio": None, "p25": None, "p75": None, "n_solape": 0}
+    empty = pd.DataFrame(columns=["anio", "idx", "valor"])
+    result_series: Dict[str, pd.DataFrame] = {
+        SERIE_MODIS: empty,
+        SERIE_VIIRS_CONV: empty,
+        SERIE_MEDIA: empty,
+    }
+    if series.empty:
+        return result_series, info
+
+    wide = series.pivot_table(index=["anio", "idx"], columns="familia", values="valor", aggfunc="sum")
+    if "MODIS" in wide.columns:
+        result_series[SERIE_MODIS] = wide["MODIS"].dropna().rename("valor").reset_index()
+
+    if not {"MODIS", "VIIRS"} <= set(wide.columns):
+        return result_series, info
+
+    both = wide.dropna(subset=["MODIS", "VIIRS"])
+    both = both[(both["MODIS"] > 0) & (both["VIIRS"] > 0)]
+    info["n_solape"] = int(len(both))
+    if len(both) < 1:
+        return result_series, info
+
+    ratios = both["MODIS"] / both["VIIRS"]
+    ratio = float(ratios.median())
+    info.update(
+        {
+            "ok": len(both) >= MIN_SOLAPE_PERIODOS,
+            "has_ratio": True,
+            "ratio": ratio,
+            "p25": float(ratios.quantile(0.25)),
+            "p75": float(ratios.quantile(0.75)),
+        }
+    )
+
+    viirs_conv = (wide["VIIRS"] * ratio).dropna()
+    media = pd.concat([wide["MODIS"], wide["VIIRS"] * ratio], axis=1).mean(axis=1, skipna=True).dropna()
+
+    result_series[SERIE_VIIRS_CONV] = viirs_conv.rename("valor").reset_index()
+    result_series[SERIE_MEDIA] = media.rename("valor").reset_index()
+    return result_series, info
+
+
+def compute_anomalies(serie: pd.DataFrame, anio_foco: int) -> tuple[pd.DataFrame, str]:
+    """Compara cada periodo del año evaluado con el MISMO periodo de los demás años (z en escala log1p)."""
+    cols = ["idx", "observado", "esperado", "z", "n_ref", "critico"]
+    piv = serie.pivot_table(index="idx", columns="anio", values="valor", aggfunc="sum")
+    if anio_foco not in piv.columns:
+        return pd.DataFrame(columns=cols), "No hay datos del año evaluado."
+    ref_cols = [c for c in piv.columns if c != anio_foco]
+    if len(ref_cols) < MIN_ANIOS_REFERENCIA:
+        return pd.DataFrame(columns=cols), f"Se necesitan al menos {MIN_ANIOS_REFERENCIA} años de referencia además del evaluado."
+    ref = np.log1p(piv[ref_cols])
+    mu = ref.mean(axis=1)
+    sd = ref.std(axis=1, ddof=1).clip(lower=0.25)
+    n_ref = ref.notna().sum(axis=1)
+    x = piv[anio_foco]
+    out = pd.DataFrame(
+        {"idx": piv.index.to_numpy(), "observado": x.to_numpy(), "esperado": np.expm1(mu).to_numpy(),
+         "z": ((np.log1p(x) - mu) / sd).to_numpy(), "n_ref": n_ref.to_numpy()}
+    )
+    out = out.dropna(subset=["observado", "z"])
+    out = out[out["n_ref"] >= MIN_ANIOS_REFERENCIA].copy()
+    out["critico"] = out["z"] >= Z_CRITICO
+    return out.reset_index(drop=True), ""
+
+
 # 8. CONSULTA DE CATÁLOGOS Y DATOS SEGÚN ESTADO CANÓNICO
+set_loading_status(
+    "Consultando catálogo disponible...",
+    f"{st.session_state.active_pais} · Año {st.session_state.cal_anio}",
+)
 catalogs = fetch_api_catalogs(st.session_state.api_url, api_token=st.session_state.api_token)
-paises_api = ["Todos"] + catalogs.get("paises", [])
-anios_api = sorted(catalogs.get("anios", list(range(2018, 2026))), reverse=True)
+if not catalogs and st.session_state.allow_local_fallback:
+    catalogs = local_catalogs()
+paises_api = ["Todos"] + sorted(p for p in catalogs.get("paises", []) if p != "Todos")
+_anios_cat: List[int] = []
+for _a in catalogs.get("anios", []):
+    try:
+        val_a = int(_a)
+        if 2000 <= val_a <= 2025:
+            _anios_cat.append(val_a)
+    except (TypeError, ValueError):
+        pass
+anios_api = sorted(set(_anios_cat) or set(range(2018, 2026)), reverse=True)
 
 if st.session_state.active_pais not in paises_api:
     st.session_state.active_pais = "Todos"
@@ -1710,11 +2143,25 @@ fecha_iso_activa = f"{st.session_state.cal_anio:04d}-{st.session_state.cal_mes:0
 query_fecha = fecha_iso_activa if st.session_state.temporal_mode == "fecha_exacta" else None
 query_mes = st.session_state.cal_mes if st.session_state.temporal_mode == "mes_completo" else None
 
-df_grid, is_live_api, connection_status = fetch_incendios_grid(
+_period_preview = (
+    fecha_iso_activa
+    if st.session_state.temporal_mode == "fecha_exacta"
+    else (
+        f"{MESES_NOMBRES[st.session_state.cal_mes]} {st.session_state.cal_anio}"
+        if st.session_state.temporal_mode == "mes_completo"
+        else f"Año {st.session_state.cal_anio}"
+    )
+)
+set_loading_status(
+    "Descargando focos satelitales...",
+    f"{st.session_state.active_pais} · {_period_preview}",
+)
+
+df_grid, is_live_api, connection_status, was_truncated = fetch_incendios_grid(
     st.session_state.api_url,
     st.session_state.allow_local_fallback,
     pais=st.session_state.active_pais,
-    anio=st.session_state.cal_anio,
+    anio=None if query_fecha else st.session_state.cal_anio,
     mes=query_mes,
     fecha=query_fecha,
     strict_latam_bounds=st.session_state.strict_latam,
@@ -1726,30 +2173,36 @@ if not df_grid.empty:
     riesgos_disponibles = [r for r in ["Alto", "Medio", "Bajo"] if r in df_grid["nivel_riesgo"].unique()]
     if not riesgos_disponibles:
         riesgos_disponibles = sorted(df_grid["nivel_riesgo"].unique().tolist())
-    sats_disponibles = sorted(df_grid["satelite"].unique().tolist())
     insts_disponibles = sorted(df_grid["instrumento"].unique().tolist())
 else:
     riesgos_disponibles = ["Alto", "Medio", "Bajo"]
-    sats_disponibles = catalogs.get("satelites", ["Terra", "Aqua", "N20", "SNPP"])
     insts_disponibles = catalogs.get("instrumentos", ["MODIS", "VIIRS"])
+
+preferred_inst = next((i for i in insts_disponibles if "VIIRS" in i.upper()), insts_disponibles[0] if insts_disponibles else "VIIRS")
+if st.session_state.active_inst is None:
+    selected_inst = [preferred_inst]
+else:
+    _valid_i = [i for i in st.session_state.active_inst if i in insts_disponibles]
+    selected_inst = _valid_i if _valid_i else [preferred_inst]
+
+if not df_grid.empty:
+    sats_disponibles = sorted(df_grid.loc[df_grid["instrumento"].isin(selected_inst), "satelite"].unique().tolist())
+    sats_catalogo = sorted(df_grid["satelite"].unique().tolist())
+else:
+    sats_disponibles = catalogs.get("satelites", [])
+    sats_catalogo = sats_disponibles
 
 if st.session_state.active_riesgo is None:
     selected_riesgo = riesgos_disponibles
 else:
-    valid_r = [r for r in st.session_state.active_riesgo if r in riesgos_disponibles]
-    selected_riesgo = valid_r if valid_r else riesgos_disponibles
+    _valid_r = [r for r in st.session_state.active_riesgo if r in riesgos_disponibles]
+    selected_riesgo = _valid_r if _valid_r else riesgos_disponibles
 
 if st.session_state.active_sat is None:
     selected_sat = sats_disponibles
 else:
-    valid_s = [s for s in st.session_state.active_sat if s in sats_disponibles]
-    selected_sat = valid_s if valid_s else sats_disponibles
-
-if st.session_state.active_inst is None:
-    selected_inst = insts_disponibles
-else:
-    valid_i = [i for i in st.session_state.active_inst if i in insts_disponibles]
-    selected_inst = valid_i if valid_i else insts_disponibles
+    _valid_s = [s for s in st.session_state.active_sat if s in sats_disponibles]
+    selected_sat = _valid_s if _valid_s else sats_disponibles
 
 if not df_grid.empty:
     base_filtered_df = df_grid[
@@ -1784,6 +2237,8 @@ if has_active_2d_drawing and not base_filtered_df.empty:
 else:
     filtered_df = base_filtered_df.reset_index(drop=True)
 
+fams_active = sorted(filtered_df["familia"].unique().tolist()) if not filtered_df.empty else []
+
 if st.session_state.temporal_mode == "fecha_exacta":
     periodo_txt = fecha_iso_activa
 elif st.session_state.temporal_mode == "mes_completo":
@@ -1791,29 +2246,19 @@ elif st.session_state.temporal_mode == "mes_completo":
 else:
     periodo_txt = f"Año {st.session_state.cal_anio}"
 
-frp_desc = "Sin límite"
-if st.session_state.frp_min is not None or st.session_state.frp_max is not None:
-    parts_f = []
-    if st.session_state.frp_min is not None:
-        parts_f.append(f"≥ {st.session_state.frp_min:g} MW")
-    if st.session_state.frp_max is not None:
-        parts_f.append(f"≤ {st.session_state.frp_max:g} MW")
-    frp_desc = " y ".join(parts_f)
 
-brillo_desc = "Sin límite"
-if st.session_state.brillo_min is not None or st.session_state.brillo_max is not None:
-    parts_b = []
-    if st.session_state.brillo_min is not None:
-        parts_b.append(f"≥ {st.session_state.brillo_min:g} K")
-    if st.session_state.brillo_max is not None:
-        parts_b.append(f"≤ {st.session_state.brillo_max:g} K")
-    brillo_desc = " y ".join(parts_b)
+def _range_desc(vmin: Optional[float], vmax: Optional[float], unit: str) -> str:
+    parts = []
+    if vmin is not None:
+        parts.append(f"≥ {vmin:g} {unit}")
+    if vmax is not None:
+        parts.append(f"≤ {vmax:g} {unit}")
+    return " y ".join(parts) if parts else "Sin límite"
 
-zona_2d_desc = (
-    f"Polígono cerrado ({len(st.session_state.drawn_polygon_2d)} vértices)"
-    if has_active_2d_drawing
-    else "No aplicada"
-)
+
+frp_desc = _range_desc(st.session_state.frp_min, st.session_state.frp_max, "MW")
+brillo_desc = _range_desc(st.session_state.brillo_min, st.session_state.brillo_max, "K")
+zona_2d_desc = f"Polígono cerrado ({len(st.session_state.drawn_polygon_2d)} vértices)" if has_active_2d_drawing else "No aplicada"
 
 export_metadata: Dict[str, Any] = {
     "origen": f"Servidor Externo ({st.session_state.api_url})" if is_live_api else "Respaldo Local CSV",
@@ -1825,144 +2270,8 @@ export_metadata: Dict[str, Any] = {
     "riesgo": ", ".join(selected_riesgo),
     "frp_filtro": frp_desc,
     "brillo_filtro": brillo_desc,
+    "aviso": "MODIS y VIIRS combinados: los conteos no son comparables" if len(fams_active) > 1 else "",
 }
-
-csv_payload = convert_df_to_csv_bytes(filtered_df) if not filtered_df.empty else b""
-if not filtered_df.empty:
-    excel_payload, excel_ext, excel_mime = convert_df_to_excel_bytes(filtered_df, export_metadata)
-else:
-    excel_payload, excel_ext, excel_mime = b"", "xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-
-geojson_payload = (
-    convert_df_to_geojson_bytes(
-        filtered_df,
-        export_metadata,
-        drawn_polygon=st.session_state.drawn_polygon_2d if has_active_2d_drawing else None,
-    )
-    if not filtered_df.empty
-    else b""
-)
-
-fname_csv = build_export_filename(
-    st.session_state.active_pais,
-    st.session_state.temporal_mode,
-    fecha_iso_activa,
-    st.session_state.cal_mes,
-    st.session_state.cal_anio,
-    "csv",
-    has_drawn_zone=has_active_2d_drawing,
-)
-fname_excel = build_export_filename(
-    st.session_state.active_pais,
-    st.session_state.temporal_mode,
-    fecha_iso_activa,
-    st.session_state.cal_mes,
-    st.session_state.cal_anio,
-    excel_ext,
-    has_drawn_zone=has_active_2d_drawing,
-)
-fname_geojson = build_export_filename(
-    st.session_state.active_pais,
-    st.session_state.temporal_mode,
-    fecha_iso_activa,
-    st.session_state.cal_mes,
-    st.session_state.cal_anio,
-    "geojson",
-    has_drawn_zone=has_active_2d_drawing,
-)
-
-
-# 8B. DIÁLOGO MODAL DE CALENDARIO RÁPIDO
-@st.dialog("📅 Cambiar Fecha o Periodo de Medición")
-def open_quick_date_dialog(available_years: List[int]) -> None:
-    c_mes, c_anio = st.columns([0.58, 0.42])
-    with c_mes:
-        dlg_mes = st.selectbox(
-            "Mes:",
-            options=list(range(1, 13)),
-            index=st.session_state.cal_mes - 1,
-            format_func=lambda m: MESES_NOMBRES[m],
-            key="dlg_cal_mes",
-        )
-    with c_anio:
-        dlg_anio = st.selectbox(
-            "Año:",
-            options=available_years,
-            index=available_years.index(st.session_state.cal_anio),
-            key="dlg_cal_anio",
-        )
-
-    if dlg_mes != st.session_state.cal_mes or dlg_anio != st.session_state.cal_anio:
-        st.session_state.cal_mes = dlg_mes
-        st.session_state.cal_anio = dlg_anio
-        max_d = calendar.monthrange(dlg_anio, dlg_mes)[1]
-        if st.session_state.cal_dia > max_d:
-            st.session_state.cal_dia = max_d
-
-    cal_obj = calendar.Calendar(firstweekday=0)
-    semanas_mes = cal_obj.monthdatescalendar(st.session_state.cal_anio, st.session_state.cal_mes)
-
-    with st.container(key="calendario_dialog_card"):
-        st.markdown(
-            """
-            <div style="display:grid;grid-template-columns:repeat(7,1fr);text-align:center;
-                        font-weight:700;font-size:13px;color:#f8fafc;padding:2px 0 8px 0;">
-                <span>L</span><span>M</span><span>X</span><span>J</span><span>V</span><span>S</span><span>D</span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        for w_idx, semana in enumerate(semanas_mes):
-            day_cols = st.columns(7)
-            for d_idx, day_date in enumerate(semana):
-                es_mes_actual = day_date.month == st.session_state.cal_mes
-                es_dia_seleccionado = (
-                    es_mes_actual
-                    and st.session_state.temporal_mode == "fecha_exacta"
-                    and day_date.day == st.session_state.cal_dia
-                )
-                with day_cols[d_idx]:
-                    if not es_mes_actual:
-                        st.button(
-                            f"{day_date.day}",
-                            key=f"dlg_cal_out_{w_idx}_{d_idx}_{day_date.isoformat()}",
-                            disabled=True,
-                            use_container_width=True,
-                        )
-                    else:
-                        if st.button(
-                            f"{day_date.day}",
-                            key=f"dlg_cal_in_{st.session_state.cal_anio}_{st.session_state.cal_mes}_{day_date.day}",
-                            type="primary" if es_dia_seleccionado else "secondary",
-                            use_container_width=True,
-                        ):
-                            st.session_state.cal_dia = day_date.day
-                            st.session_state.temporal_mode = "fecha_exacta"
-                            st.rerun()
-
-    col_opt_mes, col_opt_anio = st.columns(2)
-    with col_opt_mes:
-        if st.button(
-            "📅 Mes completo",
-            type="primary" if st.session_state.temporal_mode == "mes_completo" else "secondary",
-            use_container_width=True,
-            key="dlg_btn_mes_completo",
-        ):
-            st.session_state.temporal_mode = "mes_completo"
-            st.rerun()
-    with col_opt_anio:
-        if st.button(
-            "🗓️ Año completo",
-            type="primary" if st.session_state.temporal_mode == "anio_completo" else "secondary",
-            use_container_width=True,
-            key="dlg_btn_anio_completo",
-        ):
-            st.session_state.temporal_mode = "anio_completo"
-            st.rerun()
-
-    if st.button("✅ Listo", type="primary", use_container_width=True, key="dlg_btn_close"):
-        st.rerun()
 
 
 # 8C. DIÁLOGO INTERACTIVO DE SELECCIÓN POR DIBUJO EN 2D
@@ -1987,7 +2296,6 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
         st.session_state.dialog_cam_lat = float(st.session_state.picked_lat_2d)
         st.session_state.dialog_cam_lon = float(st.session_state.picked_lon_2d)
 
-    # Inicializar claves de los widgets ANTES de instanciarlos en pantalla
     for k_lat in ("dlg_brush_lat", "dlg_vert_lat"):
         if k_lat not in st.session_state:
             st.session_state[k_lat] = float(st.session_state.picked_lat_2d)
@@ -1997,8 +2305,6 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
     if "dlg_brush_km" not in st.session_state:
         st.session_state["dlg_brush_km"] = 150.0
 
-    # 1) PROCESAR EL CLIC DEL MAPA ANTES DE INSTANCIAR CUALQUIER WIDGET
-    #    Así se evita StreamlitWidgetAlreadyInstantiatedError y el mapa se dibuja ya actualizado.
     map_key = f"dialog_2d_interactive_map_{st.session_state.map_widget_nonce}"
     prev_chart_state = st.session_state.get(map_key)
     if prev_chart_state is not None:
@@ -2063,7 +2369,6 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
     focus_lat = float(st.session_state.picked_lat_2d)
     focus_lon = float(st.session_state.picked_lon_2d)
 
-    # 2) CONSTRUIR CAPAS VISUALES CON EL ESTADO YA ACTUALIZADO
     static_mesh_df = build_static_clickable_mesh()
     picker_layers: List[pdk.Layer] = [
         pdk.Layer(
@@ -2117,7 +2422,6 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
             )
         )
 
-    # Polígono o círculo dibujado en borrador
     if st.session_state.draft_polygon_2d and len(st.session_state.draft_polygon_2d) >= 3:
         ring = list(st.session_state.draft_polygon_2d)
         if ring[0] != ring[-1]:
@@ -2137,7 +2441,6 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
             )
         )
 
-    # Vértices y líneas visibles del polígono por clics
     verts = st.session_state.draft_vertices_2d
     if len(verts) > 0:
         if len(verts) >= 2:
@@ -2185,7 +2488,6 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
             )
         )
 
-    # Marcador objetivo del centro / punto elegido
     picker_layers.append(
         pdk.Layer(
             "ScatterplotLayer",
@@ -2220,8 +2522,8 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
 
     st.pydeck_chart(
         picker_deck,
-        use_container_width=True,
         height=350,
+        **DECK,
         on_select="rerun",
         selection_mode="single-object",
         key=map_key,
@@ -2254,7 +2556,7 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
         st.rerun()
 
     if draw_mode == "🎯 Pincel Circular (Radio km)":
-        b1, b2, b3, b4 = st.columns([0.26, 0.26, 0.24, 0.24], vertical_alignment="bottom")
+        b1, b2, b3 = st.columns([0.34, 0.34, 0.32], vertical_alignment="bottom")
         with b1:
             st.number_input(
                 "Latitud centro:",
@@ -2280,10 +2582,6 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
                 key="dlg_brush_km",
                 on_change=_sync_circle_from_inputs,
             )
-        with b4:
-            if st.button("🖌️ Trazar círculo", type="primary", use_container_width=True, key="dlg_btn_circle_brush"):
-                _sync_circle_from_inputs()
-                st.rerun()
 
         auto_tr = st.checkbox(
             "⚡ Trazar círculo automáticamente al hacer clic sobre el mapa",
@@ -2310,7 +2608,7 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
                 on_change=_sync_vertex_inputs,
             )
         with p3:
-            if st.button("➕ Agregar punto", type="primary", use_container_width=True, key="dlg_btn_add_vert"):
+            if st.button("➕ Agregar punto", type="primary", **BTN, key="dlg_btn_add_vert"):
                 verts_new = list(st.session_state.draft_vertices_2d)
                 verts_new.append([round(float(v_lon), 5), round(float(v_lat), 5)])
                 st.session_state.draft_vertices_2d = verts_new
@@ -2324,7 +2622,7 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
             if st.button(
                 "↩️ Deshacer punto",
                 disabled=len(st.session_state.draft_vertices_2d) == 0,
-                use_container_width=True,
+                **BTN,
                 key="dlg_btn_undo_vert",
             ):
                 verts_new = list(st.session_state.draft_vertices_2d)
@@ -2345,16 +2643,15 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
             )
             st.caption(f"**Vértices trazados:** {pts_summary}")
 
-    c_apply, c_clear, c_cancel = st.columns([0.46, 0.27, 0.27])
+    c_apply, c_clear = st.columns([0.62, 0.38])
     apply_clicked = c_apply.button(
         "✅ Aplicar zona dibujada al mapa",
         type="primary",
         disabled=not (st.session_state.draft_polygon_2d and len(st.session_state.draft_polygon_2d) >= 3),
-        use_container_width=True,
+        **BTN,
         key="dlg_apply_2d_poly",
     )
-    clear_clicked = c_clear.button("🗑️ Limpiar trazo", use_container_width=True, key="dlg_clear_2d_poly")
-    close_clicked = c_cancel.button("Cerrar", use_container_width=True, key="dlg_close_2d_poly")
+    clear_clicked = c_clear.button("🗑️ Limpiar trazo", **BTN, key="dlg_clear_2d_poly")
 
     if apply_clicked and st.session_state.draft_polygon_2d:
         st.session_state.drawn_polygon_2d = [list(pt) for pt in st.session_state.draft_polygon_2d]
@@ -2375,15 +2672,6 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
         st.session_state.map_widget_nonce += 1
         st.rerun()
 
-    if close_clicked:
-        st.session_state.draft_polygon_2d = None
-        st.session_state.draft_vertices_2d = []
-        st.session_state.draft_cleared = False
-        st.session_state.last_deck_selection_raw = ""
-        st.session_state.map_widget_nonce += 1
-        st.rerun()
-
-    # Resumen en vivo de celdas y focos encerrados en el trazo actual
     draft_poly = st.session_state.draft_polygon_2d
     if draft_poly and len(draft_poly) >= 3:
         if not reference_df.empty:
@@ -2409,73 +2697,197 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
         st.info("Haz clic en cualquier punto del mapa superior para cargar sus coordenadas y trazar la selección.")
 
 
-# 9. VENTANA FLOTANTE INDEPENDIENTE DE CONEXIÓN AL SERVIDOR (ARRIBA A LA DERECHA)
-with st.container(key="dock_servidor_derecho"):
-    srv_badge = "🟢 API Conectada" if is_live_api else "🟠 Respaldo Local"
-    with st.expander(f"🔌 Servidor Backend · {srv_badge}", expanded=False):
-        new_api_url = st.text_input(
-            "Endpoint Backend Externo:",
-            value=st.session_state.api_url,
-            key="w_api_endpoint",
-        )
-        if new_api_url != st.session_state.api_url:
-            st.session_state.api_url = new_api_url
+# 8D. COMPONENTES REUTILIZABLES (un solo código para dock, filtros y calendario)
+def render_period_selector(prefix: str) -> None:
+    modos = {"fecha_exacta": "Día", "mes_completo": "Mes", "anio_completo": "Año"}
+    cur = st.session_state.temporal_mode
+    sel = st.radio(
+        "Periodo",
+        list(modos),
+        index=list(modos).index(cur),
+        format_func=lambda k: modos[k],
+        horizontal=True,
+        label_visibility="collapsed",
+        key=f"{prefix}_modo_{cur}",
+    )
+    a, m, d = st.session_state.cal_anio, st.session_state.cal_mes, st.session_state.cal_dia
+    na, nm, nd = a, m, d
+    if sel == "fecha_exacta":
+        lo = date(min(anios_api), 1, 1)
+        hi = min(date.today(), date(max(anios_api), 12, 31))
+        cur_date = min(max(date(a, m, d), lo), hi)
+        picked = st.date_input("Fecha", value=cur_date, min_value=lo, max_value=hi, key=f"{prefix}_fecha_{cur_date.isoformat()}")
+        if picked is not None:
+            na, nm, nd = picked.year, picked.month, picked.day
+    else:
+        cols = st.columns(2 if sel == "mes_completo" else 1)
+        na = cols[0].selectbox("Año", anios_api, index=anios_api.index(a), key=f"{prefix}_anio_{a}")
+        if sel == "mes_completo":
+            nm = cols[1].selectbox(
+                "Mes", list(range(1, 13)), index=m - 1, format_func=lambda x: MESES_NOMBRES[x], key=f"{prefix}_mes_{m}"
+            )
+    nd = min(nd, calendar.monthrange(na, nm)[1])
+    if sel != cur or (na, nm, nd) != (a, m, d):
+        st.session_state.temporal_mode = sel
+        st.session_state.cal_anio, st.session_state.cal_mes, st.session_state.cal_dia = na, nm, nd
+        st.rerun()
+
+
+def render_sensor_selector(prefix: str) -> None:
+    if len(insts_disponibles) < 2:
+        return
+    opts = insts_disponibles + ["Ambos"]
+    current = selected_inst[0] if len(selected_inst) == 1 else "Ambos"
+    sel = st.radio("Sensor", opts, index=opts.index(current), horizontal=True, key=f"{prefix}_sensor_{current}")
+    if sel != current:
+        st.session_state.active_inst = list(insts_disponibles) if sel == "Ambos" else [sel]
+        st.session_state.active_sat = None
+        st.rerun()
+    if len(selected_inst) > 1:
+        st.caption("⚠️ MODIS (1 km) y VIIRS (375 m) combinados: los conteos se suman pero **no son comparables**.")
+
+
+def render_aoi_controls(prefix: str) -> None:
+    has_poly = st.session_state.drawn_polygon_2d is not None and len(st.session_state.drawn_polygon_2d) >= 3
+    label = "✏️ Editar área de interés" if has_poly else "🖌️ Dibujar área de interés"
+    if st.button(label, type="secondary" if has_poly else "primary", key=f"{prefix}_aoi_open", **BTN):
+        st.session_state.draft_cleared = False
+        st.session_state.last_deck_selection_raw = ""
+        st.session_state.dialog_cam_lat = None
+        st.session_state.dialog_cam_lon = None
+        st.session_state.map_widget_nonce += 1
+        open_2d_drawing_dialog(base_filtered_df)
+    if has_poly:
+        c_en, c_del = st.columns([0.62, 0.38])
+        enabled = st.session_state.drawn_filter_enabled
+        en_val = c_en.checkbox("Filtrar por área", value=enabled, key=f"{prefix}_aoi_en_{enabled}")
+        if en_val != enabled:
+            st.session_state.drawn_filter_enabled = en_val
+            st.rerun()
+        if c_del.button("🗑️ Borrar", key=f"{prefix}_aoi_del", **BTN):
+            st.session_state.drawn_polygon_2d = None
+            st.session_state.draft_polygon_2d = None
+            st.session_state.draft_vertices_2d = []
             st.rerun()
 
-        new_api_token = st.text_input(
-            "API Key / Bearer Token (opcional):",
-            value=st.session_state.api_token,
-            type="password",
-            placeholder="Dejar vacío si el endpoint es público",
-            key="w_api_token",
-        )
-        if new_api_token != st.session_state.api_token:
-            st.session_state.api_token = new_api_token
-            st.rerun()
 
-        col_sync, col_fb = st.columns([0.52, 0.48])
-        with col_sync:
-            if st.button("🔄 Sincronizar", use_container_width=True, key="btn_sync_srv"):
-                fetch_api_catalogs.clear()
-                fetch_incendios_grid.clear()
-                build_clustered_hex_layer.clear()
-                build_matched_geodesic_grid.clear()
-                build_regional_or_globe_geodesic_grid.clear()
-                st.rerun()
-        with col_fb:
-            fb_val = st.checkbox(
+def render_download_panel(prefix: str) -> None:
+    if filtered_df.empty:
+        st.info("Sin registros filtrados para descargar.")
+        return
+    st.caption(
+        f"**{len(filtered_df):,}** celdas (**{int(filtered_df['total_incendios'].sum()):,}** focos) · "
+        f"{st.session_state.active_pais} · {periodo_txt}"
+    )
+    fmt = st.radio("Formato", ["CSV", "Excel", "GeoJSON"], horizontal=True, key=f"{prefix}_dl_fmt", label_visibility="collapsed")
+    polygon = st.session_state.drawn_polygon_2d if has_active_2d_drawing else None
+    set_loading_status(f"Preparando descarga {fmt}...", f"{len(filtered_df):,} celdas filtradas")
+    payload, ext, mime = build_export_payload(fmt, filtered_df, export_metadata, polygon)
+    st.download_button(
+        f"⬇️ Descargar {fmt}",
+        data=payload,
+        file_name=build_export_filename(
+            st.session_state.active_pais, st.session_state.temporal_mode, fecha_iso_activa,
+            st.session_state.cal_mes, st.session_state.cal_anio, ext, has_drawn_zone=has_active_2d_drawing,
+        ),
+        mime=mime,
+        key=f"{prefix}_dl_btn",
+        **DL,
+    )
+
+
+def render_map_legend() -> None:
+    pal = THERMAL_PALETTES.get(st.session_state.palette_name, next(iter(THERMAL_PALETTES.values())))
+    stops = ", ".join(
+        f"rgb({int(r)},{int(g)},{int(b)}) {int(s * 100)}%" for s, r, g, b in zip(pal["stops"], pal["r"], pal["g"], pal["b"])
+    )
+    warn = (
+        "<div style='color:#fbbf24;margin-top:5px;'>⚠️ MODIS y VIIRS combinados: conteos no comparables</div>"
+        if len(fams_active) > 1
+        else ""
+    )
+    st.markdown(
+        f"<div class='map-legend'><b>Intensidad relativa de esta vista</b>"
+        f"<div class='bar' style='background:linear-gradient(90deg,{stops})'></div>"
+        f"<div class='ends'><span>baja</span><span>alta</span></div>"
+        f"<div class='note'>Combina brillo, FRP y focos, normalizados <b>dentro de la vista actual</b>: "
+        f"no es comparable entre periodos ni áreas. Para comparar en el tiempo usa 📅 Calendario.</div>{warn}</div>",
+        unsafe_allow_html=True,
+    )
+
+
+# 9. PANEL DE CONEXIÓN AL SERVIDOR BACKEND (Arriba a la Derecha)
+if SHOW_SERVER_PANEL:
+    with st.container(key="dock_servidor_derecho"):
+        srv_badge = "🟢 API En Vivo" if is_live_api else "🟠 Respaldo Local"
+        with st.expander(f"🔌 Servidor Backend · {srv_badge}", expanded=False):
+            new_api_url = st.text_input(
+                "Endpoint Backend Externo:",
+                value=st.session_state.api_url,
+                key="w_api_endpoint",
+            )
+            new_api_token = st.text_input(
+                "API Key / Bearer Token (opcional):",
+                value=st.session_state.api_token,
+                type="password",
+                placeholder="Dejar vacío si el endpoint es público",
+                key="w_api_token",
+            )
+            col_sync, col_fb = st.columns([0.52, 0.48], vertical_alignment="center")
+            sync = col_sync.button("🔄 Sincronizar", key="btn_sync_srv", **BTN)
+            fb_val = col_fb.checkbox(
                 "Respaldo local",
                 value=st.session_state.allow_local_fallback,
                 key="w_allow_fb",
             )
-            if fb_val != st.session_state.allow_local_fallback:
+            latam_val = st.checkbox(
+                "Filtrar coordenadas fuera de LATAM",
+                value=st.session_state.strict_latam,
+                key="w_strict_latam",
+            )
+            limit_val = int(
+                st.number_input(
+                    "Límite de registros por consulta:",
+                    min_value=1000,
+                    max_value=500000,
+                    step=10000,
+                    value=int(st.session_state.api_limit),
+                    key="w_api_limit",
+                )
+            )
+            (st.success if is_live_api else st.warning)(connection_status)
+            changed = (
+                new_api_url != st.session_state.api_url
+                or new_api_token != st.session_state.api_token
+                or fb_val != st.session_state.allow_local_fallback
+                or latam_val != st.session_state.strict_latam
+                or limit_val != int(st.session_state.api_limit)
+            )
+            if changed or sync:
+                st.session_state.api_url = new_api_url
+                st.session_state.api_token = new_api_token
                 st.session_state.allow_local_fallback = fb_val
+                st.session_state.strict_latam = latam_val
+                st.session_state.api_limit = limit_val
+                if sync:
+                    for _fn in (
+                        _fetch_api_catalogs_cached,
+                        fetch_incendios_grid,
+                        fetch_history,
+                        build_clustered_hex_layer,
+                        build_matched_geodesic_grid,
+                        build_regional_or_globe_geodesic_grid,
+                        load_local_firms_grid,
+                    ):
+                        _fn.clear()
                 st.rerun()
 
-        latam_val = st.checkbox(
-            "Filtrar coordenadas fuera de LATAM",
-            value=st.session_state.strict_latam,
-            key="w_strict_latam",
-        )
-        if latam_val != st.session_state.strict_latam:
-            st.session_state.strict_latam = latam_val
-            st.rerun()
 
-        if is_live_api:
-            st.success(connection_status)
-        else:
-            st.warning(connection_status)
-
-
-# 10. BARRA SUPERIOR IZQUIERDA (NAVEGACIÓN ENTRE GRID PRINCIPAL Y PÁGINA DE FILTROS)
+# 10. BARRA SUPERIOR IZQUIERDA (NAVEGACIÓN + CONTROLES DEL MAPA)
 with st.container(key="dock_superior_izquierdo"):
     nav_choice = st.radio(
-        "Navegación:",
-        options=["🗺️ Grid de Incendios", "🔍 Filtros y Buscador"],
-        index=0 if is_map_page else 1,
-        horizontal=True,
-        label_visibility="collapsed",
-        key="w_nav_radio",
+        "Navegación", PAGES, index=PAGES.index(st.session_state.active_page),
+        horizontal=True, label_visibility="collapsed", key="w_nav_radio",
     )
     if nav_choice != st.session_state.active_page:
         st.session_state.active_page = nav_choice
@@ -2483,284 +2895,116 @@ with st.container(key="dock_superior_izquierdo"):
 
     if is_map_page:
         col_toggle, col_badge = st.columns([0.66, 0.34])
-        with col_toggle:
-            btn_label = "👁️ Ocultar paneles" if st.session_state.dock_visible else "☰ Mostrar paneles"
-            if st.button(btn_label, use_container_width=True, key="btn_toggle_dock"):
-                st.session_state.dock_visible = not st.session_state.dock_visible
-                st.rerun()
-        with col_badge:
-            total_fires_badge = int(filtered_df["total_incendios"].sum()) if not filtered_df.empty else 0
-            badge_dot = "🟢" if is_live_api else "🟠"
-            st.markdown(
-                f"<div style='background:rgba(17,21,30,0.88);border:1px solid rgba(255,255,255,0.15);"
-                f"border-radius:10px;padding:7px 6px;text-align:center;color:#fbbf24;font-size:12px;font-weight:700;'>"
-                f"{badge_dot} {total_fires_badge:,}</div>",
-                unsafe_allow_html=True,
-            )
+        if col_toggle.button("👁️ Ocultar paneles" if st.session_state.dock_visible else "☰ Mostrar paneles", key="btn_toggle_dock", **BTN):
+            st.session_state.dock_visible = not st.session_state.dock_visible
+            st.rerun()
+        total_fires_badge = int(filtered_df["total_incendios"].sum()) if not filtered_df.empty else 0
+        col_badge.markdown(
+            f"<div style='background:rgba(17,21,30,0.88);border:1px solid rgba(255,255,255,0.15);"
+            f"border-radius:10px;padding:7px 6px;text-align:center;color:#fbbf24;font-size:12px;font-weight:700;'>"
+            f"{'🟢' if is_live_api else '🟠'} {total_fires_badge:,}</div>",
+            unsafe_allow_html=True,
+        )
 
         if st.session_state.dock_visible:
-            # 1) Tarjeta compacta del menú de filtros activos
-            with st.expander(f"🔎 Filtro activo: {st.session_state.active_pais} · {periodo_txt}", expanded=False):
-                col_pais_lbl, col_date_btn = st.columns([0.48, 0.52], vertical_alignment="center")
-                with col_pais_lbl:
-                    st.markdown(
-                        f"<div style='font-size:13px;color:#cbd5e1;'><b>País:</b> {st.session_state.active_pais}</div>",
-                        unsafe_allow_html=True,
-                    )
-                with col_date_btn:
-                    with st.container(key="btn_quick_date_modal"):
-                        if st.button(
-                            f"📅 {periodo_txt}",
-                            use_container_width=True,
-                            help="Haz clic para cambiar únicamente la fecha o el periodo",
-                            key="trigger_quick_date_dialog",
-                        ):
-                            open_quick_date_dialog(anios_api)
-
-                numeric_tags = []
-                if st.session_state.frp_min is not None or st.session_state.frp_max is not None:
-                    f_lo = f"≥{st.session_state.frp_min:g}" if st.session_state.frp_min is not None else ""
-                    f_hi = f"≤{st.session_state.frp_max:g}" if st.session_state.frp_max is not None else ""
-                    numeric_tags.append(f"**FRP:** {' '.join(x for x in (f_lo, f_hi) if x)} MW")
-                if st.session_state.brillo_min is not None or st.session_state.brillo_max is not None:
-                    b_lo = f"≥{st.session_state.brillo_min:g}" if st.session_state.brillo_min is not None else ""
-                    b_hi = f"≤{st.session_state.brillo_max:g}" if st.session_state.brillo_max is not None else ""
-                    numeric_tags.append(f"**Brillo:** {' '.join(x for x in (b_lo, b_hi) if x)} K")
-                if has_active_2d_drawing:
-                    numeric_tags.append("**Zona 2D:** Dibujo activo")
-
-                extra_line = f"\n\n{' · '.join(numeric_tags)}" if numeric_tags else ""
-                st.caption(
-                    f"**Satélites:** {', '.join(selected_sat)} · **Sensores:** {', '.join(selected_inst)}\n\n"
-                    f"**Riesgo:** {', '.join(selected_riesgo)}{extra_line}"
+            with st.expander(f"🔎 {st.session_state.active_pais} · {periodo_txt}", expanded=False):
+                render_period_selector("dk")
+                new_pais = st.selectbox(
+                    "País", paises_api, index=paises_api.index(st.session_state.active_pais), key=f"dk_pais_{st.session_state.active_pais}"
                 )
-                if st.button("✏️ Abrir página de Filtros y Buscador", use_container_width=True, key="btn_go_filters"):
-                    st.session_state.active_page = "🔍 Filtros y Buscador"
+                if new_pais != st.session_state.active_pais:
+                    st.session_state.active_pais = new_pais
                     st.rerun()
+                render_sensor_selector("dk")
+                st.caption("Más filtros (FRP, brillo, satélite, riesgo) y búsqueda en lenguaje natural: pestaña **🔍 Filtros**.")
+                if was_truncated:
+                    st.warning("Respuesta truncada por el límite de registros: los datos están incompletos.")
 
-            # 2) Módulo de Descarga justo debajo del menú de filtros
-            with st.expander(f"📥 Descargar Datos Filtrados ({len(filtered_df):,} celdas)", expanded=False):
-                if not filtered_df.empty:
-                    total_exp_fires = int(filtered_df["total_incendios"].sum())
-                    src_txt = "servidor backend" if is_live_api else "respaldo local"
-                    st.caption(
-                        f"Exporta **{len(filtered_df):,}** celdas (**{total_exp_fires:,}** focos) desde **{src_txt}** "
-                        f"para **{st.session_state.active_pais}** ({periodo_txt}):"
-                    )
-                    dl_c1, dl_c2, dl_c3 = st.columns(3)
-                    with dl_c1:
-                        st.download_button(
-                            label="📄 CSV",
-                            data=csv_payload,
-                            file_name=fname_csv,
-                            mime="text/csv",
-                            use_container_width=True,
-                            key="dock_dl_csv",
-                        )
-                    with dl_c2:
-                        st.download_button(
-                            label="📊 Excel",
-                            data=excel_payload,
-                            file_name=fname_excel,
-                            mime=excel_mime,
-                            use_container_width=True,
-                            key="dock_dl_xlsx",
-                        )
-                    with dl_c3:
-                        st.download_button(
-                            label="🌍 GeoJSON",
-                            data=geojson_payload,
-                            file_name=fname_geojson,
-                            mime="application/geo+json",
-                            use_container_width=True,
-                            key="dock_dl_geojson",
-                        )
-                else:
-                    st.info("Sin registros filtrados para descargar.")
+            with st.expander(f"📍 Área de interés{' · activa' if has_active_2d_drawing else ''}", expanded=False):
+                render_aoi_controls("dk")
 
-            # 3) Herramienta de Selección por Dibujo en 2D
-            draw_badge = " · Activa" if has_active_2d_drawing else ""
-            with st.expander(f"🖌️ Selección por Dibujo (2D){draw_badge}", expanded=has_active_2d_drawing):
-                if st.session_state.projection_mode != "Plano (2D)":
-                    st.caption("La selección por dibujo funciona sobre la vista **Plano (2D)**.")
-                    if st.button("🗺️ Cambiar a Plano (2D) para dibujar", use_container_width=True, key="btn_switch_2d_draw"):
-                        st.session_state.projection_mode = "Plano (2D)"
-                        st.rerun()
-                else:
-                    if st.button(
-                        "🖌️ Abrir mapa interactivo de dibujo 2D",
-                        type="primary" if not has_active_2d_drawing else "secondary",
-                        use_container_width=True,
-                        key="btn_open_2d_brush_modal",
-                    ):
-                        st.session_state.draft_cleared = False
-                        st.session_state.last_deck_selection_raw = ""
-                        st.session_state.dialog_cam_lat = None
-                        st.session_state.dialog_cam_lon = None
-                        st.session_state.map_widget_nonce += 1
-                        open_2d_drawing_dialog(base_filtered_df)
+            with st.expander(f"📥 Descargar ({len(filtered_df):,} celdas)", expanded=False):
+                render_download_panel("dk")
 
-                    if st.session_state.drawn_polygon_2d is not None and len(st.session_state.drawn_polygon_2d) >= 3:
-                        c_en, c_del = st.columns([0.62, 0.38])
-                        with c_en:
-                            en_val = st.checkbox(
-                                "Filtrar por dibujo",
-                                value=st.session_state.drawn_filter_enabled,
-                                key="w_drawn_filter_en",
-                            )
-                            if en_val != st.session_state.drawn_filter_enabled:
-                                st.session_state.drawn_filter_enabled = en_val
-                                st.rerun()
-                        with c_del:
-                            if st.button("🗑️ Borrar", use_container_width=True, key="btn_clear_drawn_dock"):
-                                st.session_state.drawn_polygon_2d = None
-                                st.session_state.draft_polygon_2d = None
-                                st.session_state.draft_vertices_2d = []
-                                st.rerun()
-
-            # 4) Controles visuales de Escala Térmica y Zoom Exclusivo / Multiescala
-            with st.expander("🗺️ Escala Térmica y Zoom Exclusivo", expanded=True):
+            with st.expander("🗺️ Mapa y escala", expanded=False):
                 palette_options = list(THERMAL_PALETTES.keys())
-                sel_pal = st.selectbox(
-                    "Paleta Térmica Continua:",
-                    options=palette_options,
-                    index=palette_options.index(st.session_state.palette_name),
-                    key="w_palette_select",
+                st.session_state.palette_name = st.selectbox(
+                    "Paleta", palette_options, index=palette_options.index(st.session_state.palette_name), key="w_palette_select"
                 )
-                st.session_state.palette_name = sel_pal
-
-                sel_smooth = st.slider(
-                    "Aproximación de color entre vecinos (%):",
-                    min_value=0,
-                    max_value=60,
-                    value=st.session_state.smooth_pct,
-                    step=5,
-                    key="w_smooth_slider",
+                st.session_state.zoom_tier_num = st.select_slider(
+                    "Tamaño del hexágono", options=[1, 2, 3, 4, 5], value=st.session_state.zoom_tier_num,
+                    format_func=lambda k: ZOOM_TIERS[k]["short"], disabled=st.session_state.show_all_hex, key="w_zoom_tier_slider",
                 )
-                st.session_state.smooth_pct = sel_smooth
-
-                sel_tier = st.select_slider(
-                    "Nivel de Zoom / Escala Hexagonal (1 tamaño a la vez):",
-                    options=[1, 2, 3, 4, 5],
-                    value=st.session_state.zoom_tier_num,
-                    format_func=lambda k: ZOOM_TIERS[k]["short"],
-                    disabled=st.session_state.show_all_hex,
-                    key="w_zoom_tier_slider",
-                )
-                st.session_state.zoom_tier_num = sel_tier
-
-                sel_multi = st.checkbox(
-                    "Mostrar todos los tamaños de hexágonos a la vez (Multiescala)",
-                    value=st.session_state.show_all_hex,
-                    help="Superpone simultáneamente los 5 niveles hexagonales (Macro ~300 km hasta Sensor 1:1).",
-                    key="w_show_all_hex_cb",
-                )
-                if sel_multi != st.session_state.show_all_hex:
-                    st.session_state.show_all_hex = sel_multi
-                    st.rerun()
-
-                sel_sync_cam = st.checkbox(
-                    "Ajustar zoom de cámara automáticamente al nivel",
-                    value=st.session_state.sync_camera_zoom,
-                    key="w_sync_camera_cb",
-                )
-                st.session_state.sync_camera_zoom = sel_sync_cam
-
-                sel_extrude = st.checkbox(
-                    "Activar profundidad del terreno (Extrusión 3D)",
-                    value=st.session_state.terrain_depth_3d,
-                    help="Activa el relieve 3D por cantidad de incendios. Desactivado por defecto.",
-                    key="w_extrude_cb",
-                )
-                st.session_state.terrain_depth_3d = sel_extrude
-
                 proj_options = ["Plano (2D)", "Esfera 3D (Globo)"]
-                sel_proj = st.radio(
-                    "Proyección Cartográfica:",
-                    options=proj_options,
-                    index=proj_options.index(st.session_state.projection_mode),
-                    key="w_proj_radio",
-                )
+                sel_proj = st.radio("Proyección", proj_options, index=proj_options.index(st.session_state.projection_mode), horizontal=True, key="w_proj_radio")
                 if sel_proj != st.session_state.projection_mode:
                     st.session_state.projection_mode = sel_proj
                     st.rerun()
-
-                if st.session_state.projection_mode == "Esfera 3D (Globo)":
-                    st.session_state.show_world_map_3d = st.checkbox(
-                        "Mapamundi y Fronteras (3D)", value=st.session_state.show_world_map_3d, key="w_world_3d"
-                    )
-                    st.session_state.show_graticule_3d = st.checkbox(
-                        "Paralelos y Meridianos (3D)", value=st.session_state.show_graticule_3d, key="w_grat_3d"
-                    )
-
-                st.session_state.show_base_grid = st.checkbox(
-                    "Malla Geodésica de Referencia",
-                    value=st.session_state.show_base_grid,
-                    key="w_base_grid",
-                )
+                if st.toggle("Opciones avanzadas", key="w_adv_toggle"):
+                    st.session_state.smooth_pct = st.slider("Suavizado entre vecinos (%)", 0, 60, st.session_state.smooth_pct, 5, key="w_smooth_slider")
+                    st.session_state.terrain_depth_3d = st.checkbox("Extrusión 3D por focos", value=st.session_state.terrain_depth_3d, key="w_extrude_cb")
+                    st.session_state.sync_camera_zoom = st.checkbox("Ajustar cámara al tamaño", value=st.session_state.sync_camera_zoom, key="w_sync_camera_cb")
+                    st.session_state.show_base_grid = st.checkbox("Malla de referencia", value=st.session_state.show_base_grid, key="w_base_grid")
+                    sel_multi = st.checkbox("Mostrar todos los tamaños a la vez", value=st.session_state.show_all_hex, key="w_show_all_hex_cb")
+                    if sel_multi != st.session_state.show_all_hex:
+                        st.session_state.show_all_hex = sel_multi
+                        st.rerun()
+                    if st.session_state.projection_mode == "Esfera 3D (Globo)":
+                        st.session_state.show_world_map_3d = st.checkbox("Fronteras (3D)", value=st.session_state.show_world_map_3d, key="w_world_3d")
+                        st.session_state.show_graticule_3d = st.checkbox("Paralelos y meridianos (3D)", value=st.session_state.show_graticule_3d, key="w_grat_3d")
 
 
 # ==============================================================================
-# PÁGINA A: INTERFAZ DEDICADA DE FILTROS Y BUSCADOR INTELIGENTE
+# PÁGINA: FILTROS Y BÚSQUEDA
 # ==============================================================================
-if not is_map_page:
-    st.markdown("## 🔍 Buscador Inteligente y Filtros de Incendios")
+def _num_filter(label: str, state_key: str, prefix: str) -> None:
+    cur = st.session_state[state_key]
+    val = st.number_input(
+        label, min_value=0.0, max_value=5000.0, value=float(cur) if cur is not None else 0.0,
+        step=5.0, key=f"{prefix}_{state_key}_{cur}", help="0 = sin límite",
+    )
+    new = float(val) if val > 0 else None
+    if new != cur:
+        st.session_state[state_key] = new
+        st.rerun()
+
+
+def _run_smart_search(query: str) -> None:
+    st.session_state.smart_search_query = query
+    parse_and_apply_smart_search(
+        query, available_paises=paises_api, available_anios=anios_api,
+        available_sats=sats_catalogo, available_insts=insts_disponibles,
+    )
+
+
+def render_filters_page() -> None:
+    st.markdown("## 🔍 Filtros y búsqueda")
+    st.caption(connection_status)
     st.caption(
-        "Escribe consultas combinadas en lenguaje natural (por ejemplo: **«Colombia agosto 2025 Terra FRP mayor a 50»**, "
-        "**«Brasil VIIRS brillo > 350 15 de agosto»** o **«Argentina FRP entre 30 y 120»**) o ajusta manualmente cada parámetro."
+        "Escribe una consulta y pulsa Enter, por ejemplo: **«Colombia agosto 2024 VIIRS FRP mayor a 50»**, "
+        "**«Argentina 15/08/2025 brillo > 350»** o **«Brasil 2023 año completo»**. También puedes ajustar los filtros a mano."
     )
 
     with st.container(key="panel_buscador_inteligente"):
-        col_q, col_btn_search, col_btn_reset = st.columns([0.66, 0.18, 0.16])
-        with col_q:
-            query_input = st.text_input(
-                "Buscador inteligente multi-filtro:",
-                value=st.session_state.smart_search_query,
-                placeholder="Ej: Colombia agosto 2025 Terra FRP mayor a 50 brillo > 340...",
-                key="w_smart_search_input",
-            )
-        with col_btn_search:
-            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-            if st.button("🔎 Reconocer y filtrar", type="primary", use_container_width=True, key="btn_run_smart_search"):
-                st.session_state.smart_search_query = query_input
-                parse_and_apply_smart_search(
-                    query_input,
-                    available_paises=paises_api,
-                    available_anios=anios_api,
-                    available_sats=sats_disponibles,
-                    available_insts=insts_disponibles,
-                )
-                st.rerun()
-        with col_btn_reset:
-            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-            if st.button("🧹 Limpiar todo", use_container_width=True, key="btn_clear_all_filters"):
-                st.session_state.smart_search_query = ""
-                st.session_state.last_parsed_entities = []
-                st.session_state.active_pais = "Todos"
-                st.session_state.active_riesgo = None
-                st.session_state.active_sat = None
-                st.session_state.active_inst = None
-                st.session_state.frp_min = None
-                st.session_state.frp_max = None
-                st.session_state.brillo_min = None
-                st.session_state.brillo_max = None
-                st.session_state.drawn_polygon_2d = None
-                st.session_state.draft_polygon_2d = None
-                st.session_state.draft_vertices_2d = []
-                st.session_state.temporal_mode = "mes_completo"
-                st.rerun()
-
-        if query_input != st.session_state.smart_search_query:
-            st.session_state.smart_search_query = query_input
-            parse_and_apply_smart_search(
-                query_input,
-                available_paises=paises_api,
-                available_anios=anios_api,
-                available_sats=sats_disponibles,
-                available_insts=insts_disponibles,
-            )
+        c_q, c_clear = st.columns([0.84, 0.16], vertical_alignment="bottom")
+        query_input = c_q.text_input(
+            "Búsqueda", value="", placeholder="Ej: Colombia agosto 2024 VIIRS FRP mayor a 50",
+            key=f"pg_search_{st.session_state.search_nonce}", label_visibility="collapsed",
+        )
+        if c_clear.button("🧹 Limpiar todo", key="pg_clear_all", **BTN):
+            for _k in ("active_riesgo", "active_sat", "active_inst", "frp_min", "frp_max", "brillo_min", "brillo_max",
+                       "drawn_polygon_2d", "draft_polygon_2d"):
+                st.session_state[_k] = None
+            st.session_state.active_pais = "Todos"
+            st.session_state.draft_vertices_2d = []
+            st.session_state.smart_search_query = ""
+            st.session_state.last_parsed_entities = []
+            st.session_state.temporal_mode = "mes_completo"
+            st.session_state.search_nonce += 1
             st.rerun()
-
+        if query_input and query_input != st.session_state.smart_search_query:
+            _run_smart_search(query_input)
+            st.rerun()
         if st.session_state.last_parsed_entities:
             badges_html = "".join(
                 f"<span style='display:inline-block;margin:4px 6px 2px 0;padding:4px 10px;border-radius:999px;"
@@ -2770,299 +3014,383 @@ if not is_map_page:
             )
             st.markdown(
                 f"<div style='margin-top:6px;'><span style='font-size:12px;color:#94a3b8;margin-right:6px;'>"
-                f"Entidades reconocidas:</span>{badges_html}</div>",
+                f"Entendí:</span>{badges_html}</div>",
                 unsafe_allow_html=True,
             )
 
     with st.container(key="panel_filtros_manuales"):
-        col_left_filters, col_right_cal = st.columns([0.55, 0.45], gap="large")
-
-        with col_left_filters:
-            st.markdown("### 🛰️ Filtros Geográficos, Sensor y Umbrales")
+        col_left, col_right = st.columns([0.55, 0.45], gap="large")
+        with col_left:
+            st.markdown("### 🛰️ Filtros")
             new_pais = st.selectbox(
-                "País (API LATAM):",
-                options=paises_api,
-                index=paises_api.index(st.session_state.active_pais),
-                key="w_page_pais_select",
+                "País", paises_api, index=paises_api.index(st.session_state.active_pais), key=f"pg_pais_{st.session_state.active_pais}"
             )
             if new_pais != st.session_state.active_pais:
                 st.session_state.active_pais = new_pais
                 st.rerun()
 
-            new_riesgo = st.multiselect(
-                "Nivel de Riesgo:",
-                options=riesgos_disponibles,
-                default=selected_riesgo,
-                key="w_page_riesgo_multi",
+            render_sensor_selector("pg")
+
+            c_sat, c_risk = st.columns(2)
+            new_sat = c_sat.multiselect("Satélite", sats_disponibles, default=selected_sat, key="pg_sat_" + "|".join(selected_sat))
+            if new_sat != selected_sat:
+                st.session_state.active_sat = new_sat or None
+                st.rerun()
+            new_risk = c_risk.multiselect(
+                "Intensidad (según la fuente)", riesgos_disponibles, default=selected_riesgo, key="pg_risk_" + "|".join(selected_riesgo)
             )
-            if new_riesgo != selected_riesgo:
-                st.session_state.active_riesgo = new_riesgo if new_riesgo else riesgos_disponibles
+            if new_risk != selected_riesgo:
+                st.session_state.active_riesgo = new_risk or None
                 st.rerun()
 
-            c_sat, c_inst = st.columns(2)
-            with c_sat:
-                new_sat = st.multiselect(
-                    "Satélite:",
-                    options=sats_disponibles,
-                    default=selected_sat,
-                    key="w_page_sat_multi",
-                )
-                if new_sat != selected_sat:
-                    st.session_state.active_sat = new_sat if new_sat else sats_disponibles
-                    st.rerun()
-            with c_inst:
-                new_inst = st.multiselect(
-                    "Instrumento / Sensor:",
-                    options=insts_disponibles,
-                    default=selected_inst,
-                    key="w_page_inst_multi",
-                )
-                if new_inst != selected_inst:
-                    st.session_state.active_inst = new_inst if new_inst else insts_disponibles
-                    st.rerun()
+            f1, f2 = st.columns(2)
+            with f1:
+                _num_filter("FRP mínimo (MW)", "frp_min", "pg")
+                _num_filter("Brillo mínimo (K)", "brillo_min", "pg")
+            with f2:
+                _num_filter("FRP máximo (MW)", "frp_max", "pg")
+                _num_filter("Brillo máximo (K)", "brillo_max", "pg")
 
-            c_frp, c_brillo = st.columns(2)
-            with c_frp:
-                frp_min_in = st.number_input(
-                    "FRP Mínimo (MW):",
-                    min_value=0.0,
-                    max_value=5000.0,
-                    value=float(st.session_state.frp_min) if st.session_state.frp_min is not None else 0.0,
-                    step=5.0,
-                    key="w_page_frp_min",
-                )
-                if frp_min_in > 0.0:
-                    st.session_state.frp_min = frp_min_in
-                elif st.session_state.frp_min is not None and frp_min_in == 0.0:
-                    st.session_state.frp_min = None
-
-            with c_brillo:
-                brillo_min_in = st.number_input(
-                    "Brillo Mínimo (K):",
-                    min_value=0.0,
-                    max_value=600.0,
-                    value=float(st.session_state.brillo_min) if st.session_state.brillo_min is not None else 0.0,
-                    step=5.0,
-                    key="w_page_brillo_min",
-                )
-                if brillo_min_in > 0.0:
-                    st.session_state.brillo_min = brillo_min_in
-                elif st.session_state.brillo_min is not None and brillo_min_in == 0.0:
-                    st.session_state.brillo_min = None
-
-            st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
-            c_go_map, c_draw_2d = st.columns([0.56, 0.44])
-            with c_go_map:
-                if st.button("✅ Aplicar filtros y ver en el Grid 2D/3D", type="primary", use_container_width=True):
-                    st.session_state.active_page = "🗺️ Grid de Incendios"
-                    st.rerun()
-            with c_draw_2d:
-                if st.button("🖌️ Selección por Dibujo 2D", use_container_width=True, key="btn_page_open_2d_draw"):
-                    st.session_state.draft_cleared = False
-                    st.session_state.last_deck_selection_raw = ""
-                    st.session_state.dialog_cam_lat = None
-                    st.session_state.dialog_cam_lon = None
-                    st.session_state.map_widget_nonce += 1
-                    open_2d_drawing_dialog(base_filtered_df)
-
-        with col_right_cal:
-            st.markdown("### 📅 Calendario de Mediciones")
-            c_mes, c_anio = st.columns([0.58, 0.42])
-            with c_mes:
-                new_mes = st.selectbox(
-                    "Mes:",
-                    options=list(range(1, 13)),
-                    index=st.session_state.cal_mes - 1,
-                    format_func=lambda m: MESES_NOMBRES[m],
-                    key="w_page_cal_mes",
-                )
-                if new_mes != st.session_state.cal_mes:
-                    st.session_state.cal_mes = new_mes
-                    st.rerun()
-            with c_anio:
-                new_anio = st.selectbox(
-                    "Año:",
-                    options=anios_api,
-                    index=anios_api.index(st.session_state.cal_anio),
-                    key="w_page_cal_anio",
-                )
-                if new_anio != st.session_state.cal_anio:
-                    st.session_state.cal_anio = new_anio
-                    st.rerun()
-
-            cal_obj = calendar.Calendar(firstweekday=0)
-            semanas_mes = cal_obj.monthdatescalendar(st.session_state.cal_anio, st.session_state.cal_mes)
-
-            with st.container(key="calendario_card"):
-                st.markdown(
-                    """
-                    <div style="display:grid;grid-template-columns:repeat(7,1fr);text-align:center;
-                                font-weight:700;font-size:13px;color:#f8fafc;padding:2px 0 8px 0;">
-                        <span>L</span><span>M</span><span>X</span><span>J</span><span>V</span><span>S</span><span>D</span>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-                for w_idx, semana in enumerate(semanas_mes):
-                    day_cols = st.columns(7)
-                    for d_idx, day_date in enumerate(semana):
-                        es_mes_actual = day_date.month == st.session_state.cal_mes
-                        es_dia_seleccionado = (
-                            es_mes_actual
-                            and st.session_state.temporal_mode == "fecha_exacta"
-                            and day_date.day == st.session_state.cal_dia
-                        )
-                        with day_cols[d_idx]:
-                            if not es_mes_actual:
-                                st.button(
-                                    f"{day_date.day}",
-                                    key=f"p_cal_out_{w_idx}_{d_idx}_{day_date.isoformat()}",
-                                    disabled=True,
-                                    use_container_width=True,
-                                )
-                            else:
-                                if st.button(
-                                    f"{day_date.day}",
-                                    key=f"p_cal_in_{st.session_state.cal_anio}_{st.session_state.cal_mes}_{day_date.day}",
-                                    type="primary" if es_dia_seleccionado else "secondary",
-                                    use_container_width=True,
-                                ):
-                                    st.session_state.cal_dia = day_date.day
-                                    st.session_state.temporal_mode = "fecha_exacta"
-                                    st.rerun()
-
-            col_opt_mes, col_opt_anio = st.columns(2)
-            with col_opt_mes:
-                if st.button(
-                    "📅 Mes completo",
-                    type="primary" if st.session_state.temporal_mode == "mes_completo" else "secondary",
-                    use_container_width=True,
-                    key="p_btn_mes_completo",
-                ):
-                    st.session_state.temporal_mode = "mes_completo"
-                    st.rerun()
-            with col_opt_anio:
-                if st.button(
-                    "🗓️ Año completo",
-                    type="primary" if st.session_state.temporal_mode == "anio_completo" else "secondary",
-                    use_container_width=True,
-                    key="p_btn_anio_completo",
-                ):
-                    st.session_state.temporal_mode = "anio_completo"
-                    st.rerun()
-
-            if st.session_state.temporal_mode == "fecha_exacta":
-                st.caption(f"Filtro activo: Fecha exacta **{fecha_iso_activa}**")
-            elif st.session_state.temporal_mode == "mes_completo":
-                st.caption(
-                    f"Filtro activo: Mes completo **{MESES_NOMBRES[st.session_state.cal_mes]} {st.session_state.cal_anio}**"
-                )
-            else:
-                st.caption(f"Filtro activo: Año completo **{st.session_state.cal_anio}** (12 meses)")
+        with col_right:
+            st.markdown("### 📅 Periodo y área")
+            render_period_selector("pg")
+            render_aoi_controls("pg")
 
     with st.container(key="panel_exportacion_filtros"):
-        col_exp_info, col_exp_btns = st.columns([0.46, 0.54], vertical_alignment="center")
-        with col_exp_info:
-            st.markdown("### 📥 Exportar Registros Filtrados")
-            if not filtered_df.empty:
-                total_exp_fires = int(filtered_df["total_incendios"].sum())
-                zone_note = " · **Con zona dibujada 2D**" if has_active_2d_drawing else ""
-                st.caption(
-                    f"Listos para descarga: **{len(filtered_df):,}** celdas activas (**{total_exp_fires:,}** focos) · "
-                    f"Región: **{st.session_state.active_pais}** · Periodo: **{periodo_txt}**{zone_note}"
-                )
-            else:
-                st.caption("No hay registros activos con la combinación actual de filtros.")
-
-        with col_exp_btns:
-            b_csv, b_xlsx, b_geo = st.columns(3)
-            with b_csv:
-                st.download_button(
-                    label="📄 CSV (.csv)",
-                    data=csv_payload,
-                    file_name=fname_csv,
-                    mime="text/csv",
-                    disabled=filtered_df.empty,
-                    use_container_width=True,
-                    key="page_dl_csv",
-                )
-            with b_xlsx:
-                st.download_button(
-                    label=f"📊 Excel (.{excel_ext})",
-                    data=excel_payload,
-                    file_name=fname_excel,
-                    mime=excel_mime,
-                    disabled=filtered_df.empty,
-                    use_container_width=True,
-                    key="page_dl_xlsx",
-                )
-            with b_geo:
-                st.download_button(
-                    label="🌍 GeoJSON",
-                    data=geojson_payload,
-                    file_name=fname_geojson,
-                    mime="application/geo+json",
-                    disabled=filtered_df.empty,
-                    use_container_width=True,
-                    key="page_dl_geojson",
-                )
+        st.markdown("### 📥 Exportar registros filtrados")
+        render_download_panel("pg")
 
     with st.container(key="panel_preview_filtros"):
-        st.markdown("### 📊 Vista Previa de Resultados Filtrados")
-        if not filtered_df.empty:
-            preview_clusters = build_clustered_hex_layer(
-                filtered_df,
-                radius_deg=0.50,
-                tier_label="Regional",
-                palette_name=st.session_state.palette_name,
-                smooth_weight=st.session_state.smooth_pct / 100.0,
-                is_globe=False,
+        st.markdown("### 📊 Resultados filtrados")
+        if was_truncated:
+            st.warning("La respuesta alcanzó el límite de registros: los resultados están incompletos. Reduce el periodo.")
+        if len(fams_active) > 1:
+            st.warning("MODIS y VIIRS combinados: los conteos se suman pero **no son comparables** (resolución 1 km vs 375 m).")
+        if filtered_df.empty:
+            st.info("No hay registros para la combinación actual de filtros.")
+            clear_loading_status()
+            return
+
+        set_loading_status("Calculando métricas y clústeres...", f"{len(filtered_df):,} celdas filtradas")
+        weights = filtered_df["total_incendios"].to_numpy(dtype=np.float64)
+        b_w = _wavg(filtered_df["brillo_promedio"], weights)
+        f_w = _wavg(filtered_df["frp_promedio"], weights)
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Focos / detecciones", f"{int(weights.sum()):,}")
+        k2.metric("Celdas activas", f"{len(filtered_df):,}")
+        k3.metric("Brillo ponderado", "s/d" if np.isnan(b_w) else f"{b_w:.1f} K")
+        k4.metric("FRP ponderado", "s/d" if np.isnan(f_w) else f"{f_w:.1f} MW")
+
+        col_chart, col_tbl = st.columns([0.45, 0.55], gap="large")
+        with col_chart:
+            if st.session_state.temporal_mode == "anio_completo":
+                st.caption("Focos por mes (con los filtros y el área actuales)")
+                dist = filtered_df.groupby("mes")["total_incendios"].sum().reindex(range(1, 13), fill_value=0)
+                dist.index = [MESES_NOMBRES[m][:3] for m in dist.index]
+            elif st.session_state.temporal_mode == "mes_completo" and (filtered_df["fecha"] != "").any():
+                st.caption("Focos por día (con los filtros y el área actuales)")
+                dist = filtered_df[filtered_df["fecha"] != ""].groupby("fecha")["total_incendios"].sum()
+            else:
+                st.caption("Focos por satélite")
+                dist = filtered_df.groupby("satelite")["total_incendios"].sum()
+            st.bar_chart(dist, height=220)
+
+        with col_tbl:
+            st.caption("Principales clústeres regionales")
+            mean_lat = float(filtered_df["lat_grid"].mean())
+            clusters = build_clustered_hex_layer(
+                filtered_df, radius_deg=0.50, tier_label="Regional", palette_name=st.session_state.palette_name,
+                smooth_weight=st.session_state.smooth_pct / 100.0, is_globe=False,
+                lon_scale=round(float(np.cos(np.deg2rad(mean_lat))), 2),
             )
-            total_inc = int(filtered_df["total_incendios"].sum())
-            weights = filtered_df["total_incendios"].to_numpy(dtype=np.float64)
-            brillo_pond = np.average(filtered_df["brillo_promedio"], weights=weights)
-            frp_pond = np.average(filtered_df["frp_promedio"], weights=weights)
+            st.dataframe(
+                clusters[["pais", "instrumento", "lat_grid", "lon_grid", "total_incendios", "indice_termico", "brillo_txt", "frp_txt"]]
+                .sort_values("total_incendios", ascending=False).head(20),
+                height=220, **DF,
+            )
 
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Focos / Incendios", f"{total_inc:,}")
-            k2.metric("Celdas Activas", f"{len(filtered_df):,}")
-            k3.metric("Brillo Ponderado", f"{brillo_pond:.1f} K")
-            k4.metric("FRP Ponderado", f"{frp_pond:.1f} MW")
+    clear_loading_status()
 
-            col_chart, col_tbl = st.columns([0.45, 0.55], gap="large")
-            with col_chart:
-                st.caption("Distribución Mensual de Incendios")
-                mensual = (
-                    df_grid[
-                        (df_grid["nivel_riesgo"].isin(selected_riesgo))
-                        & (df_grid["satelite"].isin(selected_sat))
-                        & (df_grid["instrumento"].isin(selected_inst))
-                    ]
-                    .groupby("mes")["total_incendios"]
-                    .sum()
-                    .reindex(range(1, 13), fill_value=0)
-                )
-                st.bar_chart(mensual, height=220)
 
-            with col_tbl:
-                st.caption("Principales Clústeres Térmicos Regionales")
-                st.dataframe(
-                    preview_clusters[
-                        ["pais", "lat_grid", "lon_grid", "total_incendios", "indice_termico", "brillo_promedio"]
-                    ]
-                    .sort_values("total_incendios", ascending=False)
-                    .head(20),
-                    use_container_width=True,
-                    height=220,
-                )
+# ==============================================================================
+# PÁGINA: CALENDARIO DE ACTIVIDAD DE QUEMA (armonización + anomalías)
+# ==============================================================================
+def add_period_start(df: pd.DataFrame, gran: str) -> pd.DataFrame:
+    d = df.copy()
+    if d.empty:
+        d["inicio"] = pd.Series(dtype="datetime64[ns]")
+        return d
+    anio = d["anio"].astype(int)
+    idx = d["idx"].astype(int)
+    if gran == "semanal":
+        d["inicio"] = pd.to_datetime({"year": anio, "month": 1, "day": 1}) + pd.to_timedelta((idx - 1) * 7, unit="D")
+    else:
+        d["inicio"] = pd.to_datetime({"year": anio, "month": idx, "day": 1})
+    return d
+
+
+def render_calendar_page() -> None:
+    st.markdown("## 📅 Calendario de actividad de quema")
+    st.caption(
+        "Historial de detecciones MODIS y VIIRS del área elegida: cuándo suele quemarse, qué periodos fueron inusuales y "
+        "cuáles son críticos. El calendario usa el **país** y el **área dibujada**; no aplica filtros de FRP, brillo o "
+        "intensidad para no sesgar la comparación entre sensores."
+    )
+
+    years_all = sorted(anios_api)
+    if len(years_all) > 1:
+        cur_rng = st.session_state.get("cal_range_w")
+        if (
+            not isinstance(cur_rng, (tuple, list))
+            or len(cur_rng) != 2
+            or cur_rng[0] not in years_all
+            or cur_rng[1] not in years_all
+            or cur_rng[0] > cur_rng[1]
+        ):
+            st.session_state.cal_range_w = (years_all[0], years_all[-1])
         else:
-            st.warning("No se encontraron registros para la combinación actual de filtros o búsqueda.")
+            st.session_state.cal_range_w = (int(cur_rng[0]), int(cur_rng[1]))
+
+    series_opts = [SERIE_MEDIA, SERIE_MODIS, SERIE_VIIRS_CONV]
+    if st.session_state.cal_series not in series_opts:
+        st.session_state.cal_series = SERIE_MEDIA
+
+    c1, c2, c3 = st.columns([0.4, 0.28, 0.32])
+    with c1:
+        if len(years_all) > 1:
+            lo, hi = st.select_slider(
+                "Años a analizar",
+                options=years_all,
+                value=st.session_state.cal_range_w,
+                key="cal_range_w",
+            )
+        else:
+            lo = hi = years_all[0]
+            st.caption(f"Año disponible: {lo}")
+    with c2:
+        metric = st.radio("Métrica", ["Focos", "FRP total (MW)"], horizontal=True, key="cal_metric")
+    with c3:
+        serie_sel = st.selectbox("Serie para mapa de calor y anomalías", series_opts, key="cal_series")
+
+    zona = "área dibujada" if has_active_2d_drawing else "toda la cobertura"
+    c_info, c_aoi = st.columns([0.62, 0.38], vertical_alignment="center")
+    c_info.caption(f"📍 **{st.session_state.active_pais}** · {zona} · Rango **{lo} – {hi}**")
+    with c_aoi:
+        render_aoi_controls("cal")
+
+    years_sel = [y for y in years_all if lo <= y <= hi]
+    set_loading_status(
+        f"Cargando historial ({lo}–{hi})...",
+        f"{st.session_state.active_pais} · {len(years_sel)} año(s) seleccionados",
+    )
+    hist, _live, trunc_years = fetch_history(
+        st.session_state.api_url, st.session_state.allow_local_fallback, st.session_state.active_pais,
+        tuple(years_sel), st.session_state.strict_latam, int(st.session_state.api_limit), st.session_state.api_token,
+    )
+    if has_active_2d_drawing and not hist.empty:
+        mask = points_in_polygon(
+            hist["lon_grid"].to_numpy(dtype=np.float64), hist["lat_grid"].to_numpy(dtype=np.float64), st.session_state.drawn_polygon_2d
+        )
+        hist = hist[mask]
+    if trunc_years:
+        st.warning(
+            f"La API devolvió exactamente el límite de registros en {', '.join(map(str, trunc_years))}: esos años pueden estar "
+            "incompletos y sesgar anomalías. Sube el límite (panel de conexión) o acota el área."
+        )
+    if hist.empty:
+        st.info("No hay datos para el país, área y años elegidos.")
+        clear_loading_status()
+        return
+
+    set_loading_status(
+        "Calculando armonización MODIS/VIIRS y anomalías...",
+        f"Analizando {len(hist):,} celdas históricas",
+    )
+    hist_t, gran = prepare_history(hist)
+    serie = fill_missing_periods(aggregate_series(hist_t, metric))
+    if serie.empty:
+        st.info("Los datos no contienen detecciones MODIS ni VIIRS reconocibles.")
+        clear_loading_status()
+        return
+
+    fams_present = sorted(serie["familia"].unique().tolist())
+    harm_series, info = harmonize_to_modis(serie)
+    xlab = "Semana del año" if gran == "semanal" else "Mes"
+
+    if info["has_ratio"]:
+        chosen = harm_series[serie_sel]
+        chosen_name = serie_sel
+        if not info["ok"]:
+            st.warning(
+                f"Solapamiento bajo entre MODIS y VIIRS ({info['n_solape']} periodos; recomendado ≥ {MIN_SOLAPE_PERIODOS}). "
+                "La conversión a formato MODIS es preliminar."
+            )
+    else:
+        fb = SERIE_MODIS if "MODIS" in fams_present else "VIIRS"
+        chosen = (
+            harm_series[SERIE_MODIS]
+            if fb == SERIE_MODIS
+            else serie[serie["familia"] == "VIIRS"][["anio", "idx", "valor"]]
+        )
+        chosen_name = fb
+        st.info(f"Solo hay datos de {fb} en este rango: no hay ambos sensores para armonizar.")
+
+    unit = "focos" if metric == "Focos" else "MW"
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric(f"Total · {chosen_name}", f"{chosen['valor'].sum():,.0f} {unit}")
+    k2.metric(
+        "Factor VIIRS → MODIS",
+        f"×{info['ratio']:.3f}" if info["has_ratio"] else "—",
+        help="Mediana de MODIS÷VIIRS en los periodos con ambos sensores activos. Multiplica VIIRS para expresarlo en escala MODIS.",
+    )
+    k3.metric("Periodos solapados", f"{info['n_solape']:,}")
+    k4.metric("Resolución temporal", "Semanal" if gran == "semanal" else "Mensual")
+    if info["has_ratio"]:
+        st.caption(
+            f"Factor de conversión VIIRS → MODIS: mediana ×{info['ratio']:.3f} "
+            f"(rango intercuartílico ×{info['p25']:.3f} – ×{info['p75']:.3f})."
+        )
+
+    st.markdown(f"### 🔥 Calendario de actividad · {chosen_name}")
+    st.caption("Cada celda es un periodo. La escala de color es **la misma para todos los años**, así que los colores sí son comparables.")
+    vmax = float(np.nanpercentile(chosen["valor"], 98)) if len(chosen) else 1.0
+    vmax = vmax if vmax > 0 else 1.0
+    heat = (
+        alt.Chart(chosen)
+        .mark_rect()
+        .encode(
+            x=alt.X("idx:O", title=xlab),
+            y=alt.Y("anio:O", title=None, sort="descending"),
+            color=alt.Color("valor:Q", title=unit, scale=alt.Scale(scheme="inferno", type="sqrt", domain=[0, vmax], clamp=True)),
+            tooltip=[alt.Tooltip("anio:O", title="Año"), alt.Tooltip("idx:O", title=xlab), alt.Tooltip("valor:Q", title=unit, format=",.0f")],
+        )
+        .properties(height=max(120, 30 * chosen["anio"].nunique()))
+    )
+    st.altair_chart(heat, **ALT)
+
+    st.markdown("### 📈 Serie temporal por sensor (escala MODIS)")
+    chart_frames = []
+    for s_label in (SERIE_MODIS, SERIE_VIIRS_CONV, SERIE_MEDIA):
+        df_s = harm_series[s_label]
+        if not df_s.empty:
+            chart_frames.append(df_s.assign(serie=s_label)[["serie", "anio", "idx", "valor"]])
+
+    if not chart_frames:
+        chart_frames.append(
+            serie.rename(columns={"familia": "serie"})[["serie", "anio", "idx", "valor"]]
+        )
+
+    long_df = add_period_start(pd.concat(chart_frames, ignore_index=True), gran)
+    series_domain = [SERIE_MODIS, SERIE_VIIRS_CONV, SERIE_MEDIA]
+    lines = (
+        alt.Chart(long_df)
+        .mark_line()
+        .encode(
+            x=alt.X("inicio:T", title=None),
+            y=alt.Y("valor:Q", title=f"{unit} (escala MODIS)"),
+            color=alt.Color(
+                "serie:N",
+                title="Serie",
+                scale=alt.Scale(domain=series_domain, range=["#38bdf8", "#fb923c", "#f8fafc"]),
+            ),
+            strokeDash=alt.StrokeDash(
+                "serie:N",
+                title="Serie",
+                scale=alt.Scale(domain=series_domain, range=[[1, 0], [5, 3], [1, 0]]),
+            ),
+            strokeWidth=alt.condition(alt.datum.serie == SERIE_MEDIA, alt.value(2.6), alt.value(1.8)),
+            tooltip=[
+                alt.Tooltip("serie:N", title="Serie"),
+                alt.Tooltip("inicio:T", title="Desde"),
+                alt.Tooltip("valor:Q", title=f"{unit} (escala MODIS)", format=",.1f"),
+            ],
+        )
+        .properties(height=280)
+    )
+    st.altair_chart(lines, **ALT)
+    st.caption(
+        "Compara en la misma escala: **MODIS** (azul continua), **VIIRS transformado a formato MODIS** (naranja discontinua) "
+        "y la **Media entre ambos** (blanca continua)."
+    )
+
+    st.markdown("### ⚠️ Condiciones inusuales y periodos críticos")
+    focus_opts = sorted(years_sel, reverse=True)
+    if st.session_state.cal_focus_year not in focus_opts:
+        st.session_state.cal_focus_year = focus_opts[0]
+    anio_foco = st.selectbox("Año a evaluar", focus_opts, key="cal_focus_year")
+    anom, anom_msg = compute_anomalies(chosen, int(anio_foco))
+    if anom_msg:
+        st.info(anom_msg)
+    elif anom.empty:
+        st.info("No hay periodos con referencia suficiente para evaluar.")
+    else:
+        crit = anom[anom["critico"]]
+        st.caption(
+            f"Cada barra compara el periodo de {anio_foco} con el mismo periodo de los otros {anom['n_ref'].max()} años "
+            f"(z en escala logarítmica). Rojo: z ≥ {Z_CRITICO:g}, es decir, claramente por encima de lo habitual."
+        )
+        bars = (
+            alt.Chart(anom)
+            .mark_bar()
+            .encode(
+                x=alt.X("idx:O", title=xlab),
+                y=alt.Y("z:Q", title="Anomalía (z)"),
+                color=alt.condition(alt.datum.z >= Z_CRITICO, alt.value("#ef4444"), alt.value("#64748b")),
+                tooltip=[alt.Tooltip("idx:O", title=xlab), alt.Tooltip("observado:Q", format=",.0f"),
+                         alt.Tooltip("esperado:Q", format=",.0f"), alt.Tooltip("z:Q", format=".2f")],
+            )
+        )
+        rule = alt.Chart(pd.DataFrame({"y": [Z_CRITICO]})).mark_rule(strokeDash=[4, 4], color="#f87171").encode(y="y:Q")
+        st.altair_chart(bars + rule, **ALT)
+        if crit.empty:
+            st.success(f"Ningún periodo de {anio_foco} superó el umbral de anomalía.")
+        else:
+            st.warning(f"{len(crit)} periodo(s) críticos en {anio_foco}.")
+            tabla = crit.sort_values("z", ascending=False).copy()
+            tabla["Periodo"] = [
+                f"{period_start(anio_foco, i, gran):%d/%m} – {period_end(anio_foco, i, gran):%d/%m}" for i in tabla["idx"]
+            ]
+            tabla = tabla.rename(columns={"observado": f"Observado ({unit})", "esperado": f"Esperado ({unit})", "z": "z"})
+            st.dataframe(
+                tabla[["Periodo", f"Observado ({unit})", f"Esperado ({unit})", "z"]].round(1).reset_index(drop=True), height=240, **DF
+            )
+
+    raw_viirs_export = serie[serie["familia"] == "VIIRS"].assign(serie="VIIRS (sin escalar)")[["serie", "anio", "idx", "valor"]]
+    export_series_df = pd.concat([long_df.drop(columns=["inicio"], errors="ignore"), raw_viirs_export], ignore_index=True)
+    tidy = add_period_start(export_series_df, gran)
+    tidy["periodo_inicio"] = tidy["inicio"].dt.strftime("%Y-%m-%d")
+    st.download_button(
+        "⬇️ Descargar series (CSV)",
+        data=tidy[["serie", "anio", "idx", "periodo_inicio", "valor"]].to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"serie_{st.session_state.active_pais}_{lo}-{hi}_{metric.split()[0]}.csv".replace(" ", "_"),
+        mime="text/csv", key="cal_dl_series",
+    )
+    with st.expander("ℹ️ Cómo se calcula y qué limitaciones tiene"):
+        st.markdown(
+            f"""
+- **Dos sensores distintos.** MODIS (1 km, desde 2000) y VIIRS (375 m, desde 2012) no cuentan lo mismo: VIIRS ve fuegos más pequeños y puede
+  partir un mismo fuego en varias detecciones. **Nunca se suman sin escalar**; cada sensor se agrega por separado.
+- **VIIRS (formato MODIS) y Media.** Se estima la razón mediana MODIS÷VIIRS en los periodos donde ambos tuvieron actividad (mínimo {MIN_SOLAPE_PERIODOS}).
+  VIIRS×razón expresa VIIRS en la escala de MODIS, y **Media (MODIS y VIIRS)** promedia ambas series cuando coinciden (o toma la disponible).
+- **Ceros.** La API solo devuelve celdas con detección; un periodo sin filas cuenta como 0 desde el primer año con datos de ese sensor
+  hasta el último periodo observado de cada año.
+- **Anomalía.** Para cada periodo se compara `log(1+valor)` del año evaluado con la media y desviación del mismo periodo en los demás años
+  (mínimo {MIN_ANIOS_REFERENCIA}); la desviación tiene un piso de 0.25 para no exagerar periodos casi constantes. Crítico: z ≥ {Z_CRITICO:g}.
+- **Qué no es.** Detecciones térmicas ≠ superficie quemada ni riesgo futuro. Nubes, humo, ángulo de escaneo y horarios de paso afectan lo que ve cada sensor.
+- **Cobertura.** Resolución {'semanal (semanas de 7 días desde el 1 de enero)' if gran == 'semanal' else 'mensual (la fuente no entrega fecha diaria)'}.
+"""
+        )
+
+    clear_loading_status()
 
 
 # ==============================================================================
-# PÁGINA B: MAPA PRINCIPAL (GRID DE INCENDIOS 2D / ESFERA 3D)
+# DESPACHO DE PÁGINAS
 # ==============================================================================
+if st.session_state.active_page == PAGE_FILT:
+    render_filters_page()
+elif st.session_state.active_page == PAGE_CAL:
+    render_calendar_page()
 else:
     smooth_weight = st.session_state.smooth_pct / 100.0
     zoom_tier_num = st.session_state.zoom_tier_num
@@ -3071,6 +3399,11 @@ else:
     sync_camera_zoom = st.session_state.sync_camera_zoom
     terrain_depth_3d = st.session_state.terrain_depth_3d
     is_globe = st.session_state.projection_mode == "Esfera 3D (Globo)"
+
+    set_loading_status(
+        "Generando malla térmica hexagonal...",
+        f"{'Multiescala (1–5)' if show_all_hex else active_tier['short']} · {len(filtered_df):,} celdas activas",
+    )
 
     if not filtered_df.empty:
         center_lat = float(filtered_df["lat_grid"].mean())
@@ -3084,6 +3417,7 @@ else:
         center_lon = float(df_grid["lon_grid"].mean())
     else:
         center_lat, center_lon = -15.0, -60.0
+    lon_scale = round(float(np.cos(np.deg2rad(min(max(center_lat, -75.0), 75.0)))), 2)
 
     if show_all_hex:
         base_zoom = 3.8 if not is_globe else 2.2
@@ -3141,6 +3475,7 @@ else:
             normal_grid_df = build_regional_or_globe_geodesic_grid(
                 radius_deg=1.35,
                 is_globe=is_globe,
+                lon_scale=lon_scale,
                 globe_altitude_m=1200.0,
             )
             active_layers.append(
@@ -3163,6 +3498,7 @@ else:
                 global_envelope_df = build_regional_or_globe_geodesic_grid(
                     radius_deg=1.35,
                     is_globe=is_globe,
+                    lon_scale=lon_scale,
                     globe_altitude_m=600.0,
                 )
                 active_layers.append(
@@ -3191,6 +3527,7 @@ else:
                 center_lat=center_lat,
                 block_size=active_tier["block_size"],
                 is_globe=is_globe,
+                lon_scale=lon_scale,
                 globe_altitude_m=1200.0,
             )
             active_layers.append(
@@ -3238,6 +3575,7 @@ else:
                     palette_name=st.session_state.palette_name,
                     smooth_weight=smooth_weight,
                     is_globe=is_globe,
+                    lon_scale=lon_scale,
                     is_sensor_1to1=(t_id == 5),
                     globe_altitude_m=1210.0 + t_id * 5.0,
                 )
@@ -3250,12 +3588,12 @@ else:
                 palette_name=st.session_state.palette_name,
                 smooth_weight=smooth_weight,
                 is_globe=is_globe,
+                lon_scale=lon_scale,
                 is_sensor_1to1=(zoom_tier_num == 5),
                 globe_altitude_m=1210.0,
             )
             active_layers.append(_make_hex_polygon_layer(f"thermal_hex_single_tier_{zoom_tier_num}", df_active_hex))
 
-    # Capa visual del polígono encerrado por dibujo en 2D
     if not is_globe and st.session_state.drawn_polygon_2d and len(st.session_state.drawn_polygon_2d) >= 3:
         drawn_ring = list(st.session_state.drawn_polygon_2d)
         if drawn_ring[0] != drawn_ring[-1]:
@@ -3303,6 +3641,11 @@ else:
         )
         map_view = pdk.View(type="MapView", controller=True, repeat=False)
 
+    set_loading_status(
+        "Renderizando mapa interactivo...",
+        f"{'Esfera 3D' if is_globe else 'Plano 2D'} · {st.session_state.active_pais} ({periodo_txt})",
+    )
+
     deck = pdk.Deck(
         layers=active_layers,
         initial_view_state=view_state,
@@ -3310,13 +3653,15 @@ else:
         tooltip={
             "text": (
                 "{escala_vista} · {pais}\n"
-                "Intensidad Térmica: {indice_termico}% ({nivel_riesgo})\n"
-                "Incendios Agrupados: {total_incendios} ({celdas_agrupadas} celdas)\n"
-                "Brillo Prom.: {brillo_promedio} K | FRP Prom.: {frp_promedio} MW\n"
+                "Intensidad relativa (vista): {indice_termico}% · {nivel_intensidad}\n"
+                "Focos: {total_incendios} (MODIS {n_modis} · VIIRS {n_viirs}) · {celdas_agrupadas} celdas\n"
+                "Brillo prom.: {brillo_txt} | FRP prom.: {frp_txt}\n"
                 "Cobertura: {resolucion_m} ({area_km2} km²) · Sensor: {instrumento} ({satelite})"
             )
         },
         map_style=None if is_globe else "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
     )
 
-    st.pydeck_chart(deck, use_container_width=True, height=900)
+    st.pydeck_chart(deck, height=900, **DECK)
+    render_map_legend()
+    clear_loading_status()
