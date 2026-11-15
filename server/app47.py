@@ -37,7 +37,7 @@ SHOW_SERVER_PANEL = (
 )
 
 PAGE_MAP = "🗺️ Mapa"
-PAGE_CAL = "📅 Calendario"
+PAGE_CAL = "📊 Análisis"
 PAGE_FILT = "🔍 Filtros"
 PAGES = [PAGE_MAP, PAGE_CAL, PAGE_FILT]
 
@@ -65,45 +65,30 @@ ZOOM_TIERS: Dict[int, Dict[str, Any]] = {
         "short": "1 · Macro (~300 km)",
         "label": "Nivel 1 · Macro-Regional (~300 km)",
         "radius_deg": 1.35,
-        "grid_radius": 1.35,
-        "grid_coverage": "globe",
-        "block_size": 12,
         "camera_zoom": 2.9,
     },
     2: {
         "short": "2 · Regional (~110 km)",
         "label": "Nivel 2 · Regional (~110 km)",
         "radius_deg": 0.50,
-        "grid_radius": 0.50,
-        "grid_coverage": "globe",
-        "block_size": 16,
         "camera_zoom": 4.3,
     },
     3: {
         "short": "3 · Sub-Regional (~40 km)",
         "label": "Nivel 3 · Sub-Regional (~40 km)",
         "radius_deg": 0.18,
-        "grid_radius": 0.18,
-        "grid_coverage": "latam",
-        "block_size": 20,
         "camera_zoom": 5.7,
     },
     4: {
         "short": "4 · Local (~13 km)",
         "label": "Nivel 4 · Local / Municipal (~13 km)",
         "radius_deg": 0.06,
-        "grid_radius": 0.06,
-        "grid_coverage": "axial_clusters",
-        "block_size": 24,
         "camera_zoom": 7.3,
     },
     5: {
         "short": "5 · Celda ~1 km",
         "label": "Nivel 5 · Celda ~1 km",
         "radius_deg": SENSOR_1TO1_RADIUS_DEG,
-        "grid_radius": SENSOR_1TO1_RADIUS_DEG,
-        "grid_coverage": "axial_clusters",
-        "block_size": 24,
         "camera_zoom": 9.6,
     },
 }
@@ -255,6 +240,9 @@ DEFAULT_STATE: Dict[str, Any] = {
     "map_widget_nonce": 0,
     "last_draw_mode_2d": "🎯 Pincel Circular (Radio km)",
     "auto_trace_on_click": True,
+    "auto_uncross_polygon": True,
+    "aoi_expander_open": False,
+    "aoi_dialog_open": False,
     "palette_name": list(THERMAL_PALETTES.keys())[0],
     "smooth_pct": 35,
     "zoom_tier_num": 1,
@@ -265,6 +253,7 @@ DEFAULT_STATE: Dict[str, Any] = {
     "show_world_map_3d": True,
     "show_graticule_3d": True,
     "show_base_grid": False,
+    "w_adv_toggle": False,
     "search_nonce": 0,
     "cal_metric": "Focos",
     "cal_series": "Media (MODIS y VIIRS)",
@@ -276,11 +265,13 @@ for _k, _v in DEFAULT_STATE.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
+if st.session_state.active_page == "📅 Calendario":
+    st.session_state.active_page = PAGE_CAL
 if st.session_state.active_page not in PAGES:
     st.session_state.active_page = PAGE_MAP
 is_map_page = st.session_state.active_page == PAGE_MAP
 
-# 3. Estilos CSS dinámicos + Indicador flotante de carga + Ventana Servidor
+# 3. Estilos CSS dinámicos + Indicador flotante genérico de carga + Pestañas superiores
 page_layout_css = (
     """
     .block-container {
@@ -297,7 +288,7 @@ page_layout_css = (
         color: #f8fafc !important;
     }
     .block-container {
-        padding: 84px 36px 48px 36px !important;
+        padding: 86px 36px 48px 36px !important;
         max-width: 1260px !important;
         margin: 0 auto !important;
         overflow-y: auto !important;
@@ -318,32 +309,11 @@ st.markdown(
     }}
 
     @keyframes pulseLoaderBorder {{
-        0%, 100% {{ box-shadow: 0 14px 40px rgba(0, 0, 0, 0.72), 0 0 18px rgba(56, 189, 248, 0.22); }}
-        50% {{ box-shadow: 0 14px 40px rgba(0, 0, 0, 0.78), 0 0 28px rgba(251, 146, 60, 0.34); }}
+        0%, 100% {{ box-shadow: 0 14px 40px rgba(0, 0, 0, 0.72), 0 0 18px rgba(56, 189, 248, 0.25); }}
+        50% {{ box-shadow: 0 14px 40px rgba(0, 0, 0, 0.78), 0 0 28px rgba(251, 146, 60, 0.35); }}
     }}
 
-    /* Indicador flotante automático en el instante en que Streamlit inicia un rerun */
-    .stApp[data-test-script-state="running"]::after {{
-        content: "⏳ Cargando datos y actualizando vista...";
-        position: fixed;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        z-index: 100001;
-        background: rgba(15, 23, 42, 0.94);
-        backdrop-filter: blur(14px);
-        border: 1px solid rgba(56, 189, 248, 0.48);
-        border-radius: 14px;
-        padding: 15px 24px;
-        color: #f8fafc;
-        font-size: 14px;
-        font-weight: 600;
-        letter-spacing: 0.2px;
-        pointer-events: none;
-        animation: pulseLoaderBorder 1.6s ease-in-out infinite;
-    }}
-
-    /* Tarjeta flotante contextual con spinner animado para cada fase de procesamiento */
+    /* Tarjeta flotante genérica de carga */
     .live-loading-card {{
         position: fixed;
         top: 50%;
@@ -355,13 +325,13 @@ st.markdown(
         gap: 14px;
         background: rgba(15, 23, 42, 0.96);
         backdrop-filter: blur(16px);
-        border: 1px solid rgba(251, 146, 60, 0.58);
+        border: 1px solid rgba(56, 189, 248, 0.55);
         border-radius: 14px;
         padding: 15px 24px;
         color: #f8fafc;
         pointer-events: none;
-        min-width: 290px;
-        max-width: 450px;
+        min-width: 280px;
+        max-width: 440px;
         animation: pulseLoaderBorder 1.6s ease-in-out infinite;
     }}
 
@@ -369,8 +339,8 @@ st.markdown(
         width: 22px;
         height: 22px;
         border: 3px solid rgba(148, 163, 184, 0.25);
-        border-top-color: #fb923c;
-        border-right-color: #38bdf8;
+        border-top-color: #38bdf8;
+        border-right-color: #fb923c;
         border-radius: 50%;
         flex-shrink: 0;
         animation: spinLoader 0.8s linear infinite;
@@ -390,21 +360,107 @@ st.markdown(
         line-height: 1.3;
     }}
 
+    /* Barra de desplazamiento inferior visible para gráficas temporales expandidas */
+    div[data-testid="stAltairChart"],
+    div[data-testid="stVegaLiteChart"] {{
+        overflow-x: auto !important;
+        overflow-y: hidden !important;
+        padding-bottom: 8px !important;
+        scrollbar-width: thin !important;
+        scrollbar-color: #38bdf8 rgba(30, 41, 59, 0.75) !important;
+    }}
+    div[data-testid="stAltairChart"]::-webkit-scrollbar,
+    div[data-testid="stVegaLiteChart"]::-webkit-scrollbar {{
+        height: 10px !important;
+    }}
+    div[data-testid="stAltairChart"]::-webkit-scrollbar-track,
+    div[data-testid="stVegaLiteChart"]::-webkit-scrollbar-track {{
+        background: rgba(30, 41, 59, 0.75) !important;
+        border-radius: 6px !important;
+    }}
+    div[data-testid="stAltairChart"]::-webkit-scrollbar-thumb,
+    div[data-testid="stVegaLiteChart"]::-webkit-scrollbar-thumb {{
+        background: #38bdf8 !important;
+        border-radius: 6px !important;
+    }}
+
     {page_layout_css}
 
-    /* Dock Superior Izquierdo (Navegación + Controles del Mapa) */
+    /* Dock Superior Izquierdo (Navegación tipo Pestañas + Controles del Mapa) */
     .st-key-dock_superior_izquierdo {{
         position: fixed !important;
         top: 16px !important;
         left: 16px !important;
         z-index: 9999 !important;
-        width: 385px !important;
+        width: 392px !important;
         max-height: calc(100vh - 32px) !important;
         overflow-y: auto !important;
         display: flex !important;
         flex-direction: column !important;
         gap: 8px !important;
         padding-right: 4px !important;
+    }}
+
+    /* Estilizar las 3 opciones superiores como barra de pestañas */
+    .st-key-dock_superior_izquierdo div[data-testid="stRadio"]:first-of-type div[role="radiogroup"] {{
+        display: flex !important;
+        flex-direction: row !important;
+        width: 100% !important;
+        gap: 4px !important;
+        background: rgba(13, 18, 28, 0.94) !important;
+        backdrop-filter: blur(14px) !important;
+        border: 1px solid rgba(255, 255, 255, 0.16) !important;
+        border-radius: 12px !important;
+        padding: 4px !important;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.48) !important;
+    }}
+
+    .st-key-dock_superior_izquierdo div[data-testid="stRadio"]:first-of-type div[role="radiogroup"] > label {{
+        flex: 1 1 0% !important;
+        margin: 0 !important;
+        padding: 8px 6px !important;
+        border-radius: 8px !important;
+        border-bottom: 2px solid transparent !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        text-align: center !important;
+        cursor: pointer !important;
+        transition: all 0.18s ease !important;
+        background: transparent !important;
+    }}
+
+    /* Ocultar el círculo de radio en la barra de navegación superior */
+    .st-key-dock_superior_izquierdo div[data-testid="stRadio"]:first-of-type div[role="radiogroup"] > label > div:first-child {{
+        display: none !important;
+    }}
+
+    .st-key-dock_superior_izquierdo div[data-testid="stRadio"]:first-of-type div[role="radiogroup"] > label p {{
+        font-size: 13px !important;
+        font-weight: 600 !important;
+        color: #94a3b8 !important;
+        margin: 0 !important;
+        white-space: nowrap !important;
+    }}
+
+    .st-key-dock_superior_izquierdo div[data-testid="stRadio"]:first-of-type div[role="radiogroup"] > label:hover {{
+        background: rgba(30, 41, 59, 0.72) !important;
+    }}
+
+    .st-key-dock_superior_izquierdo div[data-testid="stRadio"]:first-of-type div[role="radiogroup"] > label:hover p {{
+        color: #e2e8f0 !important;
+    }}
+
+    /* Pestaña seleccionada */
+    .st-key-dock_superior_izquierdo div[data-testid="stRadio"]:first-of-type div[role="radiogroup"] > label:has(input:checked) {{
+        background: linear-gradient(180deg, rgba(56, 189, 248, 0.22) 0%, rgba(30, 41, 59, 0.96) 100%) !important;
+        border-bottom: 2px solid #38bdf8 !important;
+        box-shadow: 0 2px 10px rgba(56, 189, 248, 0.18) !important;
+    }}
+
+    .st-key-dock_superior_izquierdo div[data-testid="stRadio"]:first-of-type div[role="radiogroup"] > label:has(input:checked) p {{
+        color: #f8fafc !important;
+        font-weight: 700 !important;
     }}
 
     .st-key-dock_superior_izquierdo::-webkit-scrollbar {{
@@ -463,26 +519,6 @@ st.markdown(
         background: rgba(30, 41, 59, 0.95) !important;
     }}
 
-    /* Botón compacto de Periodo/Año con Calendario dentro de Filtro Activo */
-    .st-key-btn_quick_date_modal button {{
-        background: rgba(56, 189, 248, 0.12) !important;
-        border: 1px solid rgba(56, 189, 248, 0.42) !important;
-        color: #7dd3fc !important;
-        font-size: 12px !important;
-        font-weight: 700 !important;
-        min-height: 30px !important;
-        height: 30px !important;
-        padding: 0 8px !important;
-        border-radius: 8px !important;
-        box-shadow: none !important;
-    }}
-
-    .st-key-btn_quick_date_modal button:hover {{
-        background: rgba(56, 189, 248, 0.24) !important;
-        border-color: #38bdf8 !important;
-        color: #ffffff !important;
-    }}
-
     /* Tarjetas de la Página de Filtros y Exportación */
     .st-key-panel_buscador_inteligente,
     .st-key-panel_filtros_manuales,
@@ -494,72 +530,6 @@ st.markdown(
         padding: 20px 22px !important;
         box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35) !important;
         margin-bottom: 16px !important;
-    }}
-
-    /* Tarjeta oscura estilo calendario mensual (L M X J V S D) */
-    .st-key-calendario_card,
-    .st-key-calendario_dialog_card {{
-        background: #181717 !important;
-        border: 1px solid rgba(255, 255, 255, 0.09) !important;
-        border-radius: 14px !important;
-        padding: 12px 10px 10px 10px !important;
-        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04) !important;
-    }}
-
-    .st-key-calendario_card div[data-testid="stHorizontalBlock"],
-    .st-key-calendario_dialog_card div[data-testid="stHorizontalBlock"] {{
-        gap: 3px !important;
-        margin-bottom: 2px !important;
-    }}
-
-    .st-key-calendario_card div[data-testid="column"],
-    .st-key-calendario_dialog_card div[data-testid="column"] {{
-        min-width: 0 !important;
-        padding: 0 !important;
-    }}
-
-    .st-key-calendario_card button,
-    .st-key-calendario_dialog_card button {{
-        width: 100% !important;
-        min-height: 31px !important;
-        height: 31px !important;
-        padding: 0 !important;
-        font-size: 13px !important;
-        border-radius: 9px !important;
-        line-height: 1 !important;
-        box-shadow: none !important;
-    }}
-
-    .st-key-calendario_card button[kind="secondary"],
-    .st-key-calendario_dialog_card button[kind="secondary"] {{
-        background: transparent !important;
-        border: none !important;
-        color: #f8fafc !important;
-        font-weight: 500 !important;
-    }}
-
-    .st-key-calendario_card button[kind="secondary"]:hover,
-    .st-key-calendario_dialog_card button[kind="secondary"]:hover {{
-        background: rgba(255, 255, 255, 0.11) !important;
-    }}
-
-    .st-key-calendario_card button:disabled,
-    .st-key-calendario_dialog_card button:disabled {{
-        background: transparent !important;
-        border: none !important;
-        color: #5c5e63 !important;
-        opacity: 1 !important;
-        font-weight: 400 !important;
-    }}
-
-    .st-key-calendario_card button[kind="primary"],
-    .st-key-calendario_dialog_card button[kind="primary"] {{
-        background: #e04856 !important;
-        color: #ffffff !important;
-        font-weight: 700 !important;
-        border: 2px solid #181717 !important;
-        box-shadow: 0 0 0 2px #e04856 !important;
-        border-radius: 10px !important;
     }}
 
     /* Pantalla completa exclusiva para el mapa principal (sin capturar el visor dentro de stDialog) */
@@ -591,21 +561,27 @@ st.markdown(
 loading_slot = st.empty()
 
 
-def set_loading_status(title: str, subtitle: str = "") -> None:
-    """Muestra un banner flotante centrado indicando la fase actual de carga."""
-    sub_html = f"<div class='live-loading-sub'>{xml_escape(subtitle)}</div>" if subtitle else ""
+def show_generic_loading() -> None:
+    """Muestra un banner genérico flotante durante cualquier carga o procesamiento activo."""
     loading_slot.markdown(
-        f"<div class='live-loading-card'>"
-        f"<div class='live-loading-spinner'></div>"
-        f"<div><div class='live-loading-title'>{xml_escape(title)}</div>{sub_html}</div>"
-        f"</div>",
+        "<div class='live-loading-card'>"
+        "<div class='live-loading-spinner'></div>"
+        "<div>"
+        "<div class='live-loading-title'>Cargando...</div>"
+        "<div class='live-loading-sub'>Procesando datos y actualizando la vista</div>"
+        "</div>"
+        "</div>",
         unsafe_allow_html=True,
     )
 
 
 def clear_loading_status() -> None:
-    """Oculta el banner contextual al completar el renderizado de la página."""
+    """Oculta el banner genérico al completar el renderizado de la página."""
     loading_slot.empty()
+
+
+# Activar siempre el indicador genérico al inicio de cada ciclo de ejecución
+show_generic_loading()
 
 
 # 4. Carga del Mapamundi GeoJSON y Geometría Base para el Globo 3D
@@ -1306,7 +1282,7 @@ def parse_and_apply_smart_search(
     return detected
 
 
-# 6B. Utilidades de Selección Espacial por Dibujo en 2D (Ray-Casting + Malla Estática Clicable)
+# 6B. Utilidades de Selección Espacial por Dibujo en 2D (Ray-Casting + Ordenamiento sin cruces + Malla Estática)
 def points_in_polygon(lons: np.ndarray, lats: np.ndarray, polygon: List[List[float]]) -> np.ndarray:
     """Evalúa mediante Ray-Casting vectorizado qué puntos (lon, lat) caen dentro de un polígono cerrado."""
     if len(polygon) < 3 or len(lons) == 0:
@@ -1337,6 +1313,57 @@ def points_in_polygon(lons: np.ndarray, lats: np.ndarray, polygon: List[List[flo
     return inside
 
 
+def _segments_properly_intersect(
+    a: List[float], b: List[float], c: List[float], d: List[float]
+) -> bool:
+    """Comprueba si los segmentos AB y CD se cruzan estrictamente en su interior."""
+    def _ccw(p1: List[float], p2: List[float], p3: List[float]) -> float:
+        return (p3[1] - p1[1]) * (p2[0] - p1[0]) - (p2[1] - p1[1]) * (p3[0] - p1[0])
+
+    d1 = _ccw(a, c, d)
+    d2 = _ccw(b, c, d)
+    d3 = _ccw(a, b, c)
+    d4 = _ccw(a, b, d)
+    return ((d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0)) and ((d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0))
+
+
+def sanitize_and_order_polygon_vertices(
+    raw_vertices: List[List[float]], uncross: bool = True
+) -> List[List[float]]:
+    """Elimina duplicados y aplica 2-opt para deshacer cruces de líneas conservando el perímetro."""
+    cleaned: List[List[float]] = []
+    for pt in raw_vertices:
+        lon_v, lat_v = round(float(pt[0]), 5), round(float(pt[1]), 5)
+        if not any(abs(existing[0] - lon_v) < 1e-4 and abs(existing[1] - lat_v) < 1e-4 for existing in cleaned):
+            cleaned.append([lon_v, lat_v])
+
+    n = len(cleaned)
+    if not uncross or n < 4:
+        return cleaned
+
+    pts = [list(p) for p in cleaned]
+    for _ in range(60):
+        found_crossing = False
+        for i in range(n):
+            a = pts[i]
+            b = pts[(i + 1) % n]
+            for j in range(i + 2, n):
+                if i == 0 and j == n - 1:
+                    continue
+                c = pts[j]
+                d = pts[(j + 1) % n]
+                if _segments_properly_intersect(a, b, c, d):
+                    pts[i + 1 : j + 1] = list(reversed(pts[i + 1 : j + 1]))
+                    found_crossing = True
+                    break
+            if found_crossing:
+                break
+        if not found_crossing:
+            break
+
+    return pts
+
+
 def build_circular_brush_polygon(
     center_lon: float, center_lat: float, radius_km: float, num_vertices: int = 36
 ) -> List[List[float]]:
@@ -1355,8 +1382,8 @@ def build_circular_brush_polygon(
 
 @st.cache_data
 def build_static_clickable_mesh() -> pd.DataFrame:
-    """Construye una rejilla pickable 100% estática (no cambia al mover el marcador ni al variar el radio)."""
-    step = 0.5
+    """Construye una rejilla pickable 100% estática de alta precisión (0.25°)."""
+    step = 0.25
     half = step * 0.5
     lats = np.arange(-58.0, 35.5, step)
     lons = np.arange(-122.0, -30.0, step)
@@ -1379,7 +1406,7 @@ def build_static_clickable_mesh() -> pd.DataFrame:
             "polygon": polys,
             "lat": np.round(glat, 3).tolist(),
             "lon": np.round(glon, 3).tolist(),
-            "info": ["Cuadrícula 0.5° (~55 km)"] * len(glat),
+            "info": ["Cuadrícula 0.25° (~27 km)"] * len(glat),
         }
     )
 
@@ -1777,78 +1804,6 @@ def build_regional_or_globe_geodesic_grid(
     return pd.DataFrame({"polygon": _hex_ring_coords(c_lons[valid], c_lats[valid], radius_deg, lon_scale, is_globe, globe_altitude_m)})
 
 
-@st.cache_data
-def build_matched_geodesic_grid(
-    radius_deg: float,
-    coverage_mode: str,
-    data_lons: np.ndarray,
-    data_lats: np.ndarray,
-    center_lon: float,
-    center_lat: float,
-    block_size: int = 24,
-    is_globe: bool = False,
-    globe_altitude_m: float = 1200.0,
-    lon_scale: float = 1.0,
-) -> pd.DataFrame:
-    if coverage_mode == "globe":
-        return build_regional_or_globe_geodesic_grid(radius_deg, -180.0, 180.0, -82.0, 82.0, is_globe, globe_altitude_m, lon_scale)
-    if coverage_mode == "latam":
-        return build_regional_or_globe_geodesic_grid(radius_deg, -125.0, -30.0, -60.0, 36.0, is_globe, globe_altitude_m, lon_scale)
-
-    if len(data_lons) > 0:
-        all_lons = np.append(data_lons, center_lon)
-        all_lats = np.append(data_lats, center_lat)
-    else:
-        all_lons = np.array([center_lon], dtype=np.float64)
-        all_lats = np.array([center_lat], dtype=np.float64)
-
-    qi, ri = _lonlat_to_axial_bins(all_lons, all_lats, radius_deg, lon_scale)
-    bq = np.floor_divide(qi, block_size)
-    br = np.floor_divide(ri, block_size)
-
-    packed_blocks = (bq << 32) | (br & 0xFFFFFFFF)
-    unique_blocks = np.unique(packed_blocks)
-
-    expanded_set = set()
-    for pb in unique_blocks.tolist():
-        ubq = pb >> 32
-        ubr = pb & 0xFFFFFFFF
-        if ubr >= 0x80000000:
-            ubr -= 0x100000000
-        for dbq in (-1, 0, 1):
-            for dbr in (-1, 0, 1):
-                expanded_set.add((ubq + dbq, ubr + dbr))
-
-    cq, cr = _lonlat_to_axial_bins(np.array([center_lon]), np.array([center_lat]), radius_deg, lon_scale)
-    cbq, cbr = int(cq[0] // block_size), int(cr[0] // block_size)
-    for dbq in range(-3, 4):
-        for dbr in range(-2, 3):
-            expanded_set.add((cbq + dbq, cbr + dbr))
-
-    max_blocks = max(1, 85_000 // (block_size * block_size))
-    blocks_list = list(expanded_set)
-    if len(blocks_list) > max_blocks:
-        blocks_list.sort(key=lambda b: (b[0] - cbq) ** 2 + (b[1] - cbr) ** 2)
-        blocks_list = blocks_list[:max_blocks]
-
-    local_offsets = np.arange(block_size, dtype=np.int64)
-    lq, lr = np.meshgrid(local_offsets, local_offsets, indexing="ij")
-    lq = lq.ravel()
-    lr = lr.ravel()
-
-    b_arr = np.array(blocks_list, dtype=np.int64)
-    q_arr = (b_arr[:, 0:1] * block_size + lq[None, :]).ravel()
-    r_arr = (b_arr[:, 1:2] * block_size + lr[None, :]).ravel()
-
-    dx = 1.5 * radius_deg
-    dy = np.sqrt(3.0) * radius_deg
-    c_lons = dx * q_arr.astype(np.float64) / lon_scale
-    c_lats = dy * (r_arr.astype(np.float64) + q_arr.astype(np.float64) / 2.0)
-
-    valid_mask = (c_lats >= -82.0) & (c_lats <= 82.0) & (c_lons >= -180.0) & (c_lons <= 180.0)
-    return pd.DataFrame({"polygon": _hex_ring_coords(c_lons[valid_mask], c_lats[valid_mask], radius_deg, lon_scale, is_globe, globe_altitude_m)})
-
-
 def _fmt_or_na(arr: np.ndarray, suffix: str) -> List[str]:
     return ["s/d" if not np.isfinite(v) else f"{v:.1f} {suffix}" for v in arr]
 
@@ -2112,10 +2067,6 @@ def compute_anomalies(serie: pd.DataFrame, anio_foco: int) -> tuple[pd.DataFrame
 
 
 # 8. CONSULTA DE CATÁLOGOS Y DATOS SEGÚN ESTADO CANÓNICO
-set_loading_status(
-    "Consultando catálogo disponible...",
-    f"{st.session_state.active_pais} · Año {st.session_state.cal_anio}",
-)
 catalogs = fetch_api_catalogs(st.session_state.api_url, api_token=st.session_state.api_token)
 if not catalogs and st.session_state.allow_local_fallback:
     catalogs = local_catalogs()
@@ -2142,20 +2093,6 @@ if st.session_state.cal_dia > max_dias_mes:
 fecha_iso_activa = f"{st.session_state.cal_anio:04d}-{st.session_state.cal_mes:02d}-{st.session_state.cal_dia:02d}"
 query_fecha = fecha_iso_activa if st.session_state.temporal_mode == "fecha_exacta" else None
 query_mes = st.session_state.cal_mes if st.session_state.temporal_mode == "mes_completo" else None
-
-_period_preview = (
-    fecha_iso_activa
-    if st.session_state.temporal_mode == "fecha_exacta"
-    else (
-        f"{MESES_NOMBRES[st.session_state.cal_mes]} {st.session_state.cal_anio}"
-        if st.session_state.temporal_mode == "mes_completo"
-        else f"Año {st.session_state.cal_anio}"
-    )
-)
-set_loading_status(
-    "Descargando focos satelitales...",
-    f"{st.session_state.active_pais} · {_period_preview}",
-)
 
 df_grid, is_live_api, connection_status, was_truncated = fetch_incendios_grid(
     st.session_state.api_url,
@@ -2270,13 +2207,37 @@ export_metadata: Dict[str, Any] = {
     "riesgo": ", ".join(selected_riesgo),
     "frp_filtro": frp_desc,
     "brillo_filtro": brillo_desc,
-    "aviso": "MODIS y VIIRS combinados: los conteos no son comparables" if len(fams_active) > 1 else "",
+    "aviso": "MODIS y VIIRS combinados" if len(fams_active) > 1 else "",
 }
 
 
 # 8C. DIÁLOGO INTERACTIVO DE SELECCIÓN POR DIBUJO EN 2D
-@st.dialog("🖌️ Selección por Dibujo en 2D (Pincel / Lazo)", width="large")
+def _on_dismiss_2d_dialog() -> None:
+    st.session_state.aoi_dialog_open = False
+
+
+def _rebuild_polygon_draft_from_vertices() -> None:
+    ordered = sanitize_and_order_polygon_vertices(
+        st.session_state.draft_vertices_2d,
+        uncross=bool(st.session_state.auto_uncross_polygon),
+    )
+    st.session_state.draft_vertices_2d = ordered
+    if len(ordered) >= 3:
+        st.session_state.draft_polygon_2d = list(ordered) + [ordered[0]]
+    else:
+        st.session_state.draft_polygon_2d = None
+
+
+_dialog_kwargs: Dict[str, Any] = {"width": "large"}
+if "on_dismiss" in inspect.signature(st.dialog).parameters:
+    _dialog_kwargs["on_dismiss"] = _on_dismiss_2d_dialog
+
+
+@st.dialog("🖌️ Selección por Dibujo en 2D (Pincel / Lazo)", **_dialog_kwargs)
 def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
+    st.session_state.aoi_dialog_open = True
+    st.session_state.aoi_expander_open = True
+
     if (
         st.session_state.draft_polygon_2d is None
         and not st.session_state.draft_cleared
@@ -2304,6 +2265,22 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
             st.session_state[k_lon] = float(st.session_state.picked_lon_2d)
     if "dlg_brush_km" not in st.session_state:
         st.session_state["dlg_brush_km"] = 150.0
+
+    draw_mode = st.radio(
+        "Modo de dibujo 2D:",
+        options=["🎯 Pincel Circular (Radio km)", "✏️ Polígono por Clics"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="dlg_draw_mode_radio",
+    )
+
+    if draw_mode != st.session_state.last_draw_mode_2d:
+        st.session_state.last_draw_mode_2d = draw_mode
+        st.session_state.last_deck_selection_raw = ""
+        if draw_mode == "✏️ Polígono por Clics":
+            st.session_state.draft_vertices_2d = []
+            st.session_state.draft_polygon_2d = None
+            st.session_state.draft_cleared = True
 
     map_key = f"dialog_2d_interactive_map_{st.session_state.map_widget_nonce}"
     prev_chart_state = st.session_state.get(map_key)
@@ -2343,18 +2320,14 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
                     st.session_state["dlg_vert_lat"] = new_lat
                     st.session_state["dlg_vert_lon"] = new_lon
 
-                    active_mode = st.session_state.get("dlg_draw_mode_radio", st.session_state.last_draw_mode_2d)
-                    if active_mode == "✏️ Polígono por Clics":
+                    if draw_mode == "✏️ Polígono por Clics":
                         verts = list(st.session_state.draft_vertices_2d)
                         new_pt = [round(new_lon, 5), round(new_lat, 5)]
-                        if not verts or verts[-1] != new_pt:
+                        if not any(abs(v[0] - new_pt[0]) < 1e-4 and abs(v[1] - new_pt[1]) < 1e-4 for v in verts):
                             verts.append(new_pt)
                             st.session_state.draft_vertices_2d = verts
                             st.session_state.draft_cleared = False
-                            if len(verts) >= 3:
-                                st.session_state.draft_polygon_2d = list(verts) + [verts[0]]
-                            else:
-                                st.session_state.draft_polygon_2d = None
+                            _rebuild_polygon_draft_from_vertices()
                     elif st.session_state.auto_trace_on_click:
                         rad_km = float(st.session_state.get("dlg_brush_km", 150.0))
                         st.session_state.draft_polygon_2d = build_circular_brush_polygon(new_lon, new_lat, rad_km)
@@ -2362,8 +2335,8 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
                         st.session_state.draft_cleared = False
 
     st.caption(
-        "Mueve y acerca el mapa 2D con el cursor (`arrastrar` + `rueda`) y **haz clic en cualquier punto** para cargar "
-        "automáticamente su **Latitud** y **Longitud**."
+        "Mueve y acerca el mapa 2D con el cursor (`arrastrar` + `rueda`) y **haz clic en cualquier punto** para añadir vértices "
+        "o centrar el pincel."
     )
 
     focus_lat = float(st.session_state.picked_lat_2d)
@@ -2522,7 +2495,7 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
 
     st.pydeck_chart(
         picker_deck,
-        height=350,
+        height=340,
         **DECK,
         on_select="rerun",
         selection_mode="single-object",
@@ -2532,28 +2505,10 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
     st.markdown(
         f"<div style='background:rgba(56,189,248,0.12);border:1px solid rgba(56,189,248,0.45);"
         f"border-radius:10px;padding:8px 12px;color:#e0f2fe;font-size:13px;margin-bottom:6px;'>"
-        f"📍 <b>Posición elegida:</b> Latitud <code>{st.session_state.picked_lat_2d:.4f}°</code> · "
+        f"📍 <b>Último punto seleccionado:</b> Latitud <code>{st.session_state.picked_lat_2d:.4f}°</code> · "
         f"Longitud <code>{st.session_state.picked_lon_2d:.4f}°</code></div>",
         unsafe_allow_html=True,
     )
-
-    draw_mode = st.radio(
-        "Modo de dibujo 2D:",
-        options=["🎯 Pincel Circular (Radio km)", "✏️ Polígono por Clics"],
-        horizontal=True,
-        label_visibility="collapsed",
-        key="dlg_draw_mode_radio",
-    )
-
-    if draw_mode != st.session_state.last_draw_mode_2d:
-        st.session_state.last_draw_mode_2d = draw_mode
-        st.session_state.last_deck_selection_raw = ""
-        st.session_state.map_widget_nonce += 1
-        if draw_mode == "✏️ Polígono por Clics":
-            st.session_state.draft_vertices_2d = []
-            st.session_state.draft_polygon_2d = None
-            st.session_state.draft_cleared = True
-        st.rerun()
 
     if draw_mode == "🎯 Pincel Circular (Radio km)":
         b1, b2, b3 = st.columns([0.34, 0.34, 0.32], vertical_alignment="bottom")
@@ -2590,10 +2545,10 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
         )
         st.session_state.auto_trace_on_click = auto_tr
     else:
-        p1, p2, p3, p4 = st.columns([0.24, 0.24, 0.26, 0.26], vertical_alignment="bottom")
+        p1, p2, p3, p4 = st.columns([0.23, 0.23, 0.29, 0.25], vertical_alignment="bottom")
         with p1:
             v_lat = st.number_input(
-                "Latitud vértice:",
+                "Latitud manual:",
                 step=0.10,
                 format="%.4f",
                 key="dlg_vert_lat",
@@ -2601,22 +2556,32 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
             )
         with p2:
             v_lon = st.number_input(
-                "Longitud vértice:",
+                "Longitud manual:",
                 step=0.10,
                 format="%.4f",
                 key="dlg_vert_lon",
                 on_change=_sync_vertex_inputs,
             )
+        already_in_verts = any(
+            abs(v[0] - round(float(v_lon), 5)) < 1e-4 and abs(v[1] - round(float(v_lat), 5)) < 1e-4
+            for v in st.session_state.draft_vertices_2d
+        )
         with p3:
-            if st.button("➕ Agregar punto", type="primary", **BTN, key="dlg_btn_add_vert"):
+            if st.button(
+                "➕ Añadir coordenada",
+                type="secondary",
+                disabled=already_in_verts,
+                help="Cada clic en el mapa añade el vértice automáticamente; usa este botón solo si escribes coordenadas a mano.",
+                **BTN,
+                key="dlg_btn_add_vert",
+            ):
                 verts_new = list(st.session_state.draft_vertices_2d)
                 verts_new.append([round(float(v_lon), 5), round(float(v_lat), 5)])
                 st.session_state.draft_vertices_2d = verts_new
                 st.session_state.picked_lat_2d = round(float(v_lat), 4)
                 st.session_state.picked_lon_2d = round(float(v_lon), 4)
                 st.session_state.draft_cleared = False
-                if len(verts_new) >= 3:
-                    st.session_state.draft_polygon_2d = list(verts_new) + [verts_new[0]]
+                _rebuild_polygon_draft_from_vertices()
                 st.rerun()
         with p4:
             if st.button(
@@ -2629,7 +2594,7 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
                 verts_new.pop()
                 st.session_state.draft_vertices_2d = verts_new
                 if len(verts_new) >= 3:
-                    st.session_state.draft_polygon_2d = list(verts_new) + [verts_new[0]]
+                    _rebuild_polygon_draft_from_vertices()
                 else:
                     st.session_state.draft_polygon_2d = None
                     st.session_state.draft_cleared = True
@@ -2637,21 +2602,33 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
                 st.session_state.map_widget_nonce += 1
                 st.rerun()
 
+        uncross_cb = st.checkbox(
+            "🧭 Evitar cruces de líneas automáticamente (ordenar perímetro sin intersecciones)",
+            value=st.session_state.auto_uncross_polygon,
+            key="w_auto_uncross_cb",
+        )
+        if uncross_cb != st.session_state.auto_uncross_polygon:
+            st.session_state.auto_uncross_polygon = uncross_cb
+            if len(st.session_state.draft_vertices_2d) >= 3:
+                _rebuild_polygon_draft_from_vertices()
+            st.rerun()
+
         if len(st.session_state.draft_vertices_2d) > 0:
             pts_summary = " → ".join(
                 f"P{i + 1} ({v[1]:.2f}°, {v[0]:.2f}°)" for i, v in enumerate(st.session_state.draft_vertices_2d)
             )
-            st.caption(f"**Vértices trazados:** {pts_summary}")
+            st.caption(f"**Perímetro actual:** {pts_summary}")
 
-    c_apply, c_clear = st.columns([0.62, 0.38])
+    c_apply, c_clear, c_close = st.columns([0.46, 0.32, 0.22])
     apply_clicked = c_apply.button(
-        "✅ Aplicar zona dibujada al mapa",
+        "✅ Aplicar zona al mapa",
         type="primary",
         disabled=not (st.session_state.draft_polygon_2d and len(st.session_state.draft_polygon_2d) >= 3),
         **BTN,
         key="dlg_apply_2d_poly",
     )
     clear_clicked = c_clear.button("🗑️ Limpiar trazo", **BTN, key="dlg_clear_2d_poly")
+    close_clicked = c_close.button("✖️ Cerrar", **BTN, key="dlg_close_2d_poly")
 
     if apply_clicked and st.session_state.draft_polygon_2d:
         st.session_state.drawn_polygon_2d = [list(pt) for pt in st.session_state.draft_polygon_2d]
@@ -2661,6 +2638,7 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
         st.session_state.draft_cleared = False
         st.session_state.last_deck_selection_raw = ""
         st.session_state.map_widget_nonce += 1
+        st.session_state.aoi_dialog_open = False
         st.rerun()
 
     if clear_clicked:
@@ -2670,6 +2648,10 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
         st.session_state.draft_cleared = True
         st.session_state.last_deck_selection_raw = ""
         st.session_state.map_widget_nonce += 1
+        st.rerun()
+
+    if close_clicked:
+        st.session_state.aoi_dialog_open = False
         st.rerun()
 
     draft_poly = st.session_state.draft_polygon_2d
@@ -2685,7 +2667,7 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
         else:
             sel_count, sel_fires = 0, 0
         st.success(
-            f"Zona encerrada lista ({len(draft_poly)} vértices): **{sel_count:,}** celdas y **{sel_fires:,}** focos dentro del dibujo."
+            f"Zona encerrada lista ({len(draft_poly) - 1} vértices): **{sel_count:,}** celdas y **{sel_fires:,}** focos dentro del dibujo."
         )
     elif len(st.session_state.draft_vertices_2d) > 0:
         faltan = 3 - len(st.session_state.draft_vertices_2d)
@@ -2694,10 +2676,10 @@ def open_2d_drawing_dialog(reference_df: pd.DataFrame) -> None:
             f"punto(s) más del mapa para cerrar la zona."
         )
     else:
-        st.info("Haz clic en cualquier punto del mapa superior para cargar sus coordenadas y trazar la selección.")
+        st.info("Haz clic directamente sobre el mapa superior para ir colocando los puntos del polígono sin duplicados.")
 
 
-# 8D. COMPONENTES REUTILIZABLES (un solo código para dock, filtros y calendario)
+# 8D. COMPONENTES REUTILIZABLES (un solo código para dock, filtros y análisis)
 def render_period_selector(prefix: str) -> None:
     modos = {"fecha_exacta": "Día", "mes_completo": "Mes", "anio_completo": "Año"}
     cur = st.session_state.temporal_mode
@@ -2733,7 +2715,7 @@ def render_period_selector(prefix: str) -> None:
         st.rerun()
 
 
-def render_sensor_selector(prefix: str) -> None:
+def render_sensor_selector(prefix: str, show_joint_caption: bool = False) -> None:
     if len(insts_disponibles) < 2:
         return
     opts = insts_disponibles + ["Ambos"]
@@ -2743,28 +2725,32 @@ def render_sensor_selector(prefix: str) -> None:
         st.session_state.active_inst = list(insts_disponibles) if sel == "Ambos" else [sel]
         st.session_state.active_sat = None
         st.rerun()
-    if len(selected_inst) > 1:
-        st.caption("⚠️ MODIS (1 km) y VIIRS (375 m) combinados: los conteos se suman pero **no son comparables**.")
+    if show_joint_caption and len(selected_inst) > 1:
+        st.caption("Mostrando detecciones conjuntas de MODIS + VIIRS agrupadas directamente por el tamaño de hexágono elegido.")
 
 
 def render_aoi_controls(prefix: str) -> None:
     has_poly = st.session_state.drawn_polygon_2d is not None and len(st.session_state.drawn_polygon_2d) >= 3
     label = "✏️ Editar área de interés" if has_poly else "🖌️ Dibujar área de interés"
     if st.button(label, type="secondary" if has_poly else "primary", key=f"{prefix}_aoi_open", **BTN):
+        st.session_state.aoi_expander_open = True
+        st.session_state.aoi_dialog_open = True
         st.session_state.draft_cleared = False
         st.session_state.last_deck_selection_raw = ""
         st.session_state.dialog_cam_lat = None
         st.session_state.dialog_cam_lon = None
         st.session_state.map_widget_nonce += 1
-        open_2d_drawing_dialog(base_filtered_df)
+        st.rerun()
     if has_poly:
         c_en, c_del = st.columns([0.62, 0.38])
         enabled = st.session_state.drawn_filter_enabled
         en_val = c_en.checkbox("Filtrar por área", value=enabled, key=f"{prefix}_aoi_en_{enabled}")
         if en_val != enabled:
+            st.session_state.aoi_expander_open = True
             st.session_state.drawn_filter_enabled = en_val
             st.rerun()
         if c_del.button("🗑️ Borrar", key=f"{prefix}_aoi_del", **BTN):
+            st.session_state.aoi_expander_open = True
             st.session_state.drawn_polygon_2d = None
             st.session_state.draft_polygon_2d = None
             st.session_state.draft_vertices_2d = []
@@ -2781,7 +2767,6 @@ def render_download_panel(prefix: str) -> None:
     )
     fmt = st.radio("Formato", ["CSV", "Excel", "GeoJSON"], horizontal=True, key=f"{prefix}_dl_fmt", label_visibility="collapsed")
     polygon = st.session_state.drawn_polygon_2d if has_active_2d_drawing else None
-    set_loading_status(f"Preparando descarga {fmt}...", f"{len(filtered_df):,} celdas filtradas")
     payload, ext, mime = build_export_payload(fmt, filtered_df, export_metadata, polygon)
     st.download_button(
         f"⬇️ Descargar {fmt}",
@@ -2801,17 +2786,12 @@ def render_map_legend() -> None:
     stops = ", ".join(
         f"rgb({int(r)},{int(g)},{int(b)}) {int(s * 100)}%" for s, r, g, b in zip(pal["stops"], pal["r"], pal["g"], pal["b"])
     )
-    warn = (
-        "<div style='color:#fbbf24;margin-top:5px;'>⚠️ MODIS y VIIRS combinados: conteos no comparables</div>"
-        if len(fams_active) > 1
-        else ""
-    )
     st.markdown(
         f"<div class='map-legend'><b>Intensidad relativa de esta vista</b>"
         f"<div class='bar' style='background:linear-gradient(90deg,{stops})'></div>"
         f"<div class='ends'><span>baja</span><span>alta</span></div>"
         f"<div class='note'>Combina brillo, FRP y focos, normalizados <b>dentro de la vista actual</b>: "
-        f"no es comparable entre periodos ni áreas. Para comparar en el tiempo usa 📅 Calendario.</div>{warn}</div>",
+        f"no es comparable entre periodos ni áreas. Para comparar en el tiempo usa 📊 Análisis.</div></div>",
         unsafe_allow_html=True,
     )
 
@@ -2875,7 +2855,6 @@ if SHOW_SERVER_PANEL:
                         fetch_incendios_grid,
                         fetch_history,
                         build_clustered_hex_layer,
-                        build_matched_geodesic_grid,
                         build_regional_or_globe_geodesic_grid,
                         load_local_firms_grid,
                     ):
@@ -2883,7 +2862,7 @@ if SHOW_SERVER_PANEL:
                 st.rerun()
 
 
-# 10. BARRA SUPERIOR IZQUIERDA (NAVEGACIÓN + CONTROLES DEL MAPA)
+# 10. BARRA SUPERIOR IZQUIERDA (PESTAÑAS + CONTROLES DEL MAPA)
 with st.container(key="dock_superior_izquierdo"):
     nav_choice = st.radio(
         "Navegación", PAGES, index=PAGES.index(st.session_state.active_page),
@@ -2907,7 +2886,8 @@ with st.container(key="dock_superior_izquierdo"):
         )
 
         if st.session_state.dock_visible:
-            with st.expander(f"🔎 {st.session_state.active_pais} · {periodo_txt}", expanded=False):
+            with st.expander("🌍 Países y fecha", expanded=False):
+                st.caption(f"Selección activa: **{st.session_state.active_pais}** · **{periodo_txt}**")
                 render_period_selector("dk")
                 new_pais = st.selectbox(
                     "País", paises_api, index=paises_api.index(st.session_state.active_pais), key=f"dk_pais_{st.session_state.active_pais}"
@@ -2915,25 +2895,28 @@ with st.container(key="dock_superior_izquierdo"):
                 if new_pais != st.session_state.active_pais:
                     st.session_state.active_pais = new_pais
                     st.rerun()
-                render_sensor_selector("dk")
                 st.caption("Más filtros (FRP, brillo, satélite, riesgo) y búsqueda en lenguaje natural: pestaña **🔍 Filtros**.")
                 if was_truncated:
                     st.warning("Respuesta truncada por el límite de registros: los datos están incompletos.")
 
-            with st.expander(f"📍 Área de interés{' · activa' if has_active_2d_drawing else ''}", expanded=False):
+            with st.expander(
+                f"📍 Área de interés{' · activa' if has_active_2d_drawing else ''}",
+                expanded=bool(st.session_state.aoi_expander_open or has_active_2d_drawing),
+            ):
                 render_aoi_controls("dk")
 
             with st.expander(f"📥 Descargar ({len(filtered_df):,} celdas)", expanded=False):
                 render_download_panel("dk")
 
-            with st.expander("🗺️ Mapa y escala", expanded=False):
-                palette_options = list(THERMAL_PALETTES.keys())
-                st.session_state.palette_name = st.selectbox(
-                    "Paleta", palette_options, index=palette_options.index(st.session_state.palette_name), key="w_palette_select"
-                )
+            with st.expander("⚙️ Opciones", expanded=False):
+                render_sensor_selector("opt", show_joint_caption=True)
                 st.session_state.zoom_tier_num = st.select_slider(
                     "Tamaño del hexágono", options=[1, 2, 3, 4, 5], value=st.session_state.zoom_tier_num,
                     format_func=lambda k: ZOOM_TIERS[k]["short"], disabled=st.session_state.show_all_hex, key="w_zoom_tier_slider",
+                )
+                palette_options = list(THERMAL_PALETTES.keys())
+                st.session_state.palette_name = st.selectbox(
+                    "Paleta", palette_options, index=palette_options.index(st.session_state.palette_name), key="w_palette_select"
                 )
                 proj_options = ["Plano (2D)", "Esfera 3D (Globo)"]
                 sel_proj = st.radio("Proyección", proj_options, index=proj_options.index(st.session_state.projection_mode), horizontal=True, key="w_proj_radio")
@@ -2953,9 +2936,12 @@ with st.container(key="dock_superior_izquierdo"):
                         st.session_state.show_world_map_3d = st.checkbox("Fronteras (3D)", value=st.session_state.show_world_map_3d, key="w_world_3d")
                         st.session_state.show_graticule_3d = st.checkbox("Paralelos y meridianos (3D)", value=st.session_state.show_graticule_3d, key="w_grat_3d")
 
+if st.session_state.aoi_dialog_open:
+    open_2d_drawing_dialog(base_filtered_df)
+
 
 # ==============================================================================
-# PÁGINA: FILTROS Y BÚSQUEDA
+# PÁGINA: FILTROS Y BÚSQUEDA (Enfocada en filtrado, validación y exportación)
 # ==============================================================================
 def _num_filter(label: str, state_key: str, prefix: str) -> None:
     cur = st.session_state[state_key]
@@ -3061,17 +3047,14 @@ def render_filters_page() -> None:
         render_download_panel("pg")
 
     with st.container(key="panel_preview_filtros"):
-        st.markdown("### 📊 Resultados filtrados")
+        st.markdown("### 📋 Resumen y vista previa de exportación")
         if was_truncated:
             st.warning("La respuesta alcanzó el límite de registros: los resultados están incompletos. Reduce el periodo.")
-        if len(fams_active) > 1:
-            st.warning("MODIS y VIIRS combinados: los conteos se suman pero **no son comparables** (resolución 1 km vs 375 m).")
         if filtered_df.empty:
             st.info("No hay registros para la combinación actual de filtros.")
             clear_loading_status()
             return
 
-        set_loading_status("Calculando métricas y clústeres...", f"{len(filtered_df):,} celdas filtradas")
         weights = filtered_df["total_incendios"].to_numpy(dtype=np.float64)
         b_w = _wavg(filtered_df["brillo_promedio"], weights)
         f_w = _wavg(filtered_df["frp_promedio"], weights)
@@ -3081,39 +3064,20 @@ def render_filters_page() -> None:
         k3.metric("Brillo ponderado", "s/d" if np.isnan(b_w) else f"{b_w:.1f} K")
         k4.metric("FRP ponderado", "s/d" if np.isnan(f_w) else f"{f_w:.1f} MW")
 
-        col_chart, col_tbl = st.columns([0.45, 0.55], gap="large")
-        with col_chart:
-            if st.session_state.temporal_mode == "anio_completo":
-                st.caption("Focos por mes (con los filtros y el área actuales)")
-                dist = filtered_df.groupby("mes")["total_incendios"].sum().reindex(range(1, 13), fill_value=0)
-                dist.index = [MESES_NOMBRES[m][:3] for m in dist.index]
-            elif st.session_state.temporal_mode == "mes_completo" and (filtered_df["fecha"] != "").any():
-                st.caption("Focos por día (con los filtros y el área actuales)")
-                dist = filtered_df[filtered_df["fecha"] != ""].groupby("fecha")["total_incendios"].sum()
-            else:
-                st.caption("Focos por satélite")
-                dist = filtered_df.groupby("satelite")["total_incendios"].sum()
-            st.bar_chart(dist, height=220)
-
-        with col_tbl:
-            st.caption("Principales clústeres regionales")
-            mean_lat = float(filtered_df["lat_grid"].mean())
-            clusters = build_clustered_hex_layer(
-                filtered_df, radius_deg=0.50, tier_label="Regional", palette_name=st.session_state.palette_name,
-                smooth_weight=st.session_state.smooth_pct / 100.0, is_globe=False,
-                lon_scale=round(float(np.cos(np.deg2rad(mean_lat))), 2),
-            )
-            st.dataframe(
-                clusters[["pais", "instrumento", "lat_grid", "lon_grid", "total_incendios", "indice_termico", "brillo_txt", "frp_txt"]]
-                .sort_values("total_incendios", ascending=False).head(20),
-                height=220, **DF,
-            )
+        st.caption(
+            "Muestra de los registros exactos listos para descargar (ordenados por mayor número de focos). "
+            "Para explorar gráficas temporales y ranking regional, abre **📊 Análisis**."
+        )
+        preview_df = prepare_export_dataframe(
+            filtered_df.sort_values("total_incendios", ascending=False).head(25)
+        )
+        st.dataframe(preview_df, height=240, **DF)
 
     clear_loading_status()
 
 
 # ==============================================================================
-# PÁGINA: CALENDARIO DE ACTIVIDAD DE QUEMA (armonización + anomalías)
+# PÁGINA: ANÁLISIS (Distribución del periodo, serie temporal, calendario y anomalías)
 # ==============================================================================
 def add_period_start(df: pd.DataFrame, gran: str) -> pd.DataFrame:
     d = df.copy()
@@ -3130,12 +3094,55 @@ def add_period_start(df: pd.DataFrame, gran: str) -> pd.DataFrame:
 
 
 def render_calendar_page() -> None:
-    st.markdown("## 📅 Calendario de actividad de quema")
+    st.markdown("## 📊 Análisis de actividad y tendencias")
     st.caption(
-        "Historial de detecciones MODIS y VIIRS del área elegida: cuándo suele quemarse, qué periodos fueron inusuales y "
-        "cuáles son críticos. El calendario usa el **país** y el **área dibujada**; no aplica filtros de FRP, brillo o "
-        "intensidad para no sesgar la comparación entre sensores."
+        "Exploración temporal y espacial del área elegida: distribución del periodo seleccionado, evolución comparada "
+        "MODIS/VIIRS, mapa de calor multianual y detección estadística de anomalías."
     )
+
+    with st.expander(f"📌 Resumen del periodo activo ({st.session_state.active_pais} · {periodo_txt})", expanded=True):
+        if filtered_df.empty:
+            st.info("Sin registros activos para los filtros seleccionados en el mapa.")
+        else:
+            w_act = filtered_df["total_incendios"].to_numpy(dtype=np.float64)
+            b_act = _wavg(filtered_df["brillo_promedio"], w_act)
+            f_act = _wavg(filtered_df["frp_promedio"], w_act)
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Focos en periodo activo", f"{int(w_act.sum()):,}")
+            m2.metric("Celdas activas", f"{len(filtered_df):,}")
+            m3.metric("Brillo ponderado", "s/d" if np.isnan(b_act) else f"{b_act:.1f} K")
+            m4.metric("FRP ponderado", "s/d" if np.isnan(f_act) else f"{f_act:.1f} MW")
+
+            col_chart, col_tbl = st.columns([0.45, 0.55], gap="large")
+            with col_chart:
+                if st.session_state.temporal_mode == "anio_completo":
+                    st.caption("Focos por mes (periodo y filtros activos)")
+                    dist = filtered_df.groupby("mes")["total_incendios"].sum().reindex(range(1, 13), fill_value=0)
+                    dist.index = [MESES_NOMBRES[m][:3] for m in dist.index]
+                elif st.session_state.temporal_mode == "mes_completo" and (filtered_df["fecha"] != "").any():
+                    st.caption("Focos por día (periodo y filtros activos)")
+                    dist = filtered_df[filtered_df["fecha"] != ""].groupby("fecha")["total_incendios"].sum()
+                else:
+                    st.caption("Focos por satélite")
+                    dist = filtered_df.groupby("satelite")["total_incendios"].sum()
+                st.bar_chart(dist, height=230)
+
+            with col_tbl:
+                st.caption("Principales clústeres regionales")
+                mean_lat = float(filtered_df["lat_grid"].mean())
+                clusters = build_clustered_hex_layer(
+                    filtered_df, radius_deg=0.50, tier_label="Regional", palette_name=st.session_state.palette_name,
+                    smooth_weight=st.session_state.smooth_pct / 100.0, is_globe=False,
+                    lon_scale=round(float(np.cos(np.deg2rad(mean_lat))), 2),
+                )
+                st.dataframe(
+                    clusters[["pais", "instrumento", "lat_grid", "lon_grid", "total_incendios", "indice_termico", "brillo_txt", "frp_txt"]]
+                    .sort_values("total_incendios", ascending=False).head(20),
+                    height=230, **DF,
+                )
+
+    st.markdown("---")
+    st.markdown("### 🗓️ Análisis histórico multianual")
 
     years_all = sorted(anios_api)
     if len(years_all) > 1:
@@ -3179,10 +3186,6 @@ def render_calendar_page() -> None:
         render_aoi_controls("cal")
 
     years_sel = [y for y in years_all if lo <= y <= hi]
-    set_loading_status(
-        f"Cargando historial ({lo}–{hi})...",
-        f"{st.session_state.active_pais} · {len(years_sel)} año(s) seleccionados",
-    )
     hist, _live, trunc_years = fetch_history(
         st.session_state.api_url, st.session_state.allow_local_fallback, st.session_state.active_pais,
         tuple(years_sel), st.session_state.strict_latam, int(st.session_state.api_limit), st.session_state.api_token,
@@ -3202,10 +3205,6 @@ def render_calendar_page() -> None:
         clear_loading_status()
         return
 
-    set_loading_status(
-        "Calculando armonización MODIS/VIIRS y anomalías...",
-        f"Analizando {len(hist):,} celdas históricas",
-    )
     hist_t, gran = prepare_history(hist)
     serie = fill_missing_periods(aggregate_series(hist_t, metric))
     if serie.empty:
@@ -3280,13 +3279,47 @@ def render_calendar_page() -> None:
             serie.rename(columns={"familia": "serie"})[["serie", "anio", "idx", "valor"]]
         )
 
-    long_df = add_period_start(pd.concat(chart_frames, ignore_index=True), gran)
+    raw_long = pd.concat(chart_frames, ignore_index=True)
+    long_df = add_period_start(raw_long, gran)
+
+    wide_hover = long_df.pivot_table(index=["anio", "idx", "inicio"], columns="serie", values="valor", aggfunc="first").reset_index()
+    raw_viirs_period = add_period_start(serie[serie["familia"] == "VIIRS"][["anio", "idx", "valor"]], gran)
+    if not raw_viirs_period.empty:
+        wide_hover = wide_hover.merge(
+            raw_viirs_period[["anio", "idx", "valor"]].rename(columns={"valor": "VIIRS_real"}),
+            on=["anio", "idx"],
+            how="left",
+        )
+    else:
+        wide_hover["VIIRS_real"] = np.nan
+
+    for col_s in (SERIE_MODIS, SERIE_VIIRS_CONV, SERIE_MEDIA, "VIIRS_real"):
+        if col_s not in wide_hover.columns:
+            wide_hover[col_s] = np.nan
+
+    wide_hover["momento_label"] = [
+        f"{'Sem ' + str(int(i)) + ' · ' if gran == 'semanal' else MESES_NOMBRES[int(i)] + ' '}{period_start(a, i, gran):%d/%m/%Y} – {period_end(a, i, gran):%d/%m/%Y}"
+        for a, i in zip(wide_hover["anio"], wide_hover["idx"])
+    ]
+    wide_hover = wide_hover.sort_values("inicio").reset_index(drop=True)
+
+    n_pts = max(len(wide_hover), 1)
+    expanded_width = max(1250, n_pts * (22 if gran == "semanal" else 42))
+
+    nearest_sel = alt.selection_point(
+        fields=["inicio"],
+        nearest=True,
+        on="mouseover",
+        empty=False,
+        clear="mouseout",
+    )
+
     series_domain = [SERIE_MODIS, SERIE_VIIRS_CONV, SERIE_MEDIA]
-    lines = (
+    base_lines = (
         alt.Chart(long_df)
         .mark_line()
         .encode(
-            x=alt.X("inicio:T", title=None),
+            x=alt.X("inicio:T", title=None, axis=alt.Axis(format="%b %Y", tickCount="month", labelAngle=-35)),
             y=alt.Y("valor:Q", title=f"{unit} (escala MODIS)"),
             color=alt.Color(
                 "serie:N",
@@ -3299,18 +3332,50 @@ def render_calendar_page() -> None:
                 scale=alt.Scale(domain=series_domain, range=[[1, 0], [5, 3], [1, 0]]),
             ),
             strokeWidth=alt.condition(alt.datum.serie == SERIE_MEDIA, alt.value(2.6), alt.value(1.8)),
+        )
+    )
+
+    hover_points = (
+        alt.Chart(long_df)
+        .mark_circle(size=75, stroke="#0f172a", strokeWidth=1.5)
+        .encode(
+            x="inicio:T",
+            y="valor:Q",
+            color=alt.Color(
+                "serie:N",
+                scale=alt.Scale(domain=series_domain, range=["#38bdf8", "#fb923c", "#f8fafc"]),
+                legend=None,
+            ),
+            opacity=alt.condition(nearest_sel, alt.value(1.0), alt.value(0.0)),
+        )
+    )
+
+    hover_rule = (
+        alt.Chart(wide_hover)
+        .mark_rule(color="#94a3b8", strokeWidth=1.4, strokeDash=[4, 3])
+        .encode(
+            x="inicio:T",
+            opacity=alt.condition(nearest_sel, alt.value(0.95), alt.value(0.0)),
             tooltip=[
-                alt.Tooltip("serie:N", title="Serie"),
-                alt.Tooltip("inicio:T", title="Desde"),
-                alt.Tooltip("valor:Q", title=f"{unit} (escala MODIS)", format=",.1f"),
+                alt.Tooltip("momento_label:N", title="Momento exacto"),
+                alt.Tooltip(f"{SERIE_MEDIA}:Q", title=f"Media ({unit})", format=",.1f"),
+                alt.Tooltip(f"{SERIE_MODIS}:Q", title=f"MODIS ({unit})", format=",.1f"),
+                alt.Tooltip(f"{SERIE_VIIRS_CONV}:Q", title=f"VIIRS formato MODIS ({unit})", format=",.1f"),
+                alt.Tooltip("VIIRS_real:Q", title=f"VIIRS real sin escalar ({unit})", format=",.0f"),
             ],
         )
-        .properties(height=280)
+        .add_params(nearest_sel)
     )
-    st.altair_chart(lines, **ALT)
+
+    combined_ts_chart = (
+        alt.layer(base_lines, hover_points, hover_rule)
+        .properties(width=expanded_width, height=340)
+        .configure_view(strokeOpacity=0)
+    )
+    st.altair_chart(combined_ts_chart, use_container_width=False)
     st.caption(
-        "Compara en la misma escala: **MODIS** (azul continua), **VIIRS transformado a formato MODIS** (naranja discontinua) "
-        "y la **Media entre ambos** (blanca continua)."
+        "Desliza la barra inferior para recorrer el histórico ampliado. Pasa el cursor sobre cualquier punto para ver el "
+        "detalle exacto de ese periodo (**Media**, **MODIS**, **VIIRS formato MODIS** y **VIIRS real**)."
     )
 
     st.markdown("### ⚠️ Condiciones inusuales y periodos críticos")
@@ -3369,7 +3434,7 @@ def render_calendar_page() -> None:
         st.markdown(
             f"""
 - **Dos sensores distintos.** MODIS (1 km, desde 2000) y VIIRS (375 m, desde 2012) no cuentan lo mismo: VIIRS ve fuegos más pequeños y puede
-  partir un mismo fuego en varias detecciones. **Nunca se suman sin escalar**; cada sensor se agrega por separado.
+  partir un mismo fuego en varias detecciones. **Nunca se suman sin escalar** en análisis histórico; cada sensor se agrega por separado.
 - **VIIRS (formato MODIS) y Media.** Se estima la razón mediana MODIS÷VIIRS en los periodos donde ambos tuvieron actividad (mínimo {MIN_SOLAPE_PERIODOS}).
   VIIRS×razón expresa VIIRS en la escala de MODIS, y **Media (MODIS y VIIRS)** promedia ambas series cuando coinciden (o toma la disponible).
 - **Ceros.** La API solo devuelve celdas con detección; un periodo sin filas cuenta como 0 desde el primer año con datos de ese sensor
@@ -3399,11 +3464,6 @@ else:
     sync_camera_zoom = st.session_state.sync_camera_zoom
     terrain_depth_3d = st.session_state.terrain_depth_3d
     is_globe = st.session_state.projection_mode == "Esfera 3D (Globo)"
-
-    set_loading_status(
-        "Generando malla térmica hexagonal...",
-        f"{'Multiescala (1–5)' if show_all_hex else active_tier['short']} · {len(filtered_df):,} celdas activas",
-    )
 
     if not filtered_df.empty:
         center_lat = float(filtered_df["lat_grid"].mean())
@@ -3471,78 +3531,26 @@ else:
             )
 
     if st.session_state.show_base_grid:
-        if show_all_hex:
-            normal_grid_df = build_regional_or_globe_geodesic_grid(
-                radius_deg=1.35,
-                is_globe=is_globe,
-                lon_scale=lon_scale,
-                globe_altitude_m=1200.0,
+        ref_grid_radius = ZOOM_TIERS[1]["radius_deg"] if (zoom_tier_num == 1 and not show_all_hex) else ZOOM_TIERS[2]["radius_deg"]
+        global_ref_grid_df = build_regional_or_globe_geodesic_grid(
+            radius_deg=ref_grid_radius,
+            is_globe=is_globe,
+            lon_scale=lon_scale,
+            globe_altitude_m=1200.0,
+        )
+        active_layers.append(
+            pdk.Layer(
+                "PolygonLayer",
+                id=f"geodesic_global_ref_grid_{ref_grid_radius}",
+                data=global_ref_grid_df,
+                get_polygon="polygon",
+                filled=False,
+                stroked=True,
+                get_line_color=[0, 210, 255, 70],
+                line_width_min_pixels=1,
+                pickable=False,
             )
-            active_layers.append(
-                pdk.Layer(
-                    "PolygonLayer",
-                    id="geodesic_grid_normal_multiscale",
-                    data=normal_grid_df,
-                    get_polygon="polygon",
-                    filled=False,
-                    stroked=True,
-                    get_line_color=[0, 210, 255, 85],
-                    line_width_min_pixels=1,
-                    pickable=False,
-                )
-            )
-        else:
-            coverage_mode = active_tier["grid_coverage"]
-
-            if coverage_mode != "globe":
-                global_envelope_df = build_regional_or_globe_geodesic_grid(
-                    radius_deg=1.35,
-                    is_globe=is_globe,
-                    lon_scale=lon_scale,
-                    globe_altitude_m=600.0,
-                )
-                active_layers.append(
-                    pdk.Layer(
-                        "PolygonLayer",
-                        id="geodesic_grid_global_envelope",
-                        data=global_envelope_df,
-                        get_polygon="polygon",
-                        filled=False,
-                        stroked=True,
-                        get_line_color=[0, 210, 255, 38],
-                        line_width_min_pixels=1,
-                        pickable=False,
-                    )
-                )
-
-            data_lons_arr = filtered_df["lon_grid"].to_numpy(dtype=np.float64) if not filtered_df.empty else np.array([])
-            data_lats_arr = filtered_df["lat_grid"].to_numpy(dtype=np.float64) if not filtered_df.empty else np.array([])
-
-            matched_grid_df = build_matched_geodesic_grid(
-                radius_deg=active_tier["grid_radius"],
-                coverage_mode=coverage_mode,
-                data_lons=data_lons_arr,
-                data_lats=data_lats_arr,
-                center_lon=center_lon,
-                center_lat=center_lat,
-                block_size=active_tier["block_size"],
-                is_globe=is_globe,
-                lon_scale=lon_scale,
-                globe_altitude_m=1200.0,
-            )
-            active_layers.append(
-                pdk.Layer(
-                    "PolygonLayer",
-                    id=f"geodesic_grid_tier_{zoom_tier_num}",
-                    data=matched_grid_df,
-                    get_polygon="polygon",
-                    filled=False,
-                    stroked=True,
-                    get_line_color=[0, 210, 255, 95],
-                    line_width_min_pixels=1,
-                    pickable=False,
-                )
-            )
+        )
 
     def _make_hex_polygon_layer(layer_id: str, data_df: pd.DataFrame) -> pdk.Layer:
         layer_kwargs: Dict[str, Any] = {
@@ -3613,7 +3621,6 @@ else:
                 pickable=False,
             )
         )
-
     pitch_angle = 42 if (terrain_depth_3d and not is_globe) else 0
 
     if is_globe:
@@ -3640,12 +3647,6 @@ else:
             bearing=0,
         )
         map_view = pdk.View(type="MapView", controller=True, repeat=False)
-
-    set_loading_status(
-        "Renderizando mapa interactivo...",
-        f"{'Esfera 3D' if is_globe else 'Plano 2D'} · {st.session_state.active_pais} ({periodo_txt})",
-    )
-
     deck = pdk.Deck(
         layers=active_layers,
         initial_view_state=view_state,
@@ -3661,7 +3662,6 @@ else:
         },
         map_style=None if is_globe else "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
     )
-
     st.pydeck_chart(deck, height=900, **DECK)
     render_map_legend()
     clear_loading_status()
