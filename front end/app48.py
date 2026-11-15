@@ -20,7 +20,7 @@ import streamlit as st
 
 # 1. Configuración de página en modo ancho total
 st.set_page_config(
-    page_title="NASA Hot Spots · LATAM Hexagonal Thermal Map",
+    page_title="Pyronet · LATAM Hexagonal Thermal Map",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
