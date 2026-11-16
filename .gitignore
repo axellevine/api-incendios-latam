@@ -5,3 +5,4 @@ __pycache__/
 *.zip
 *.pkl
 *.pyc
+*.gz
