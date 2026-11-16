@@ -1,17 +1,23 @@
 import gc
 import glob
+import io
+import json
 import os
 import re
-from fastapi import FastAPI, Query
+from typing import Iterator, List, Optional
+
+from fastapi import FastAPI, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import StreamingResponse
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import uvicorn
 
-app = FastAPI(title="API Mapa de Incendios LATAM/América", version="10.0")
+app = FastAPI(title="API Mapa de Incendios LATAM/América", version="11.0-lowmem")
 
-app.add_middleware(GZipMiddleware, minimum_size=1000)
+# Nota: No usamos GZipMiddleware sobre respuestas grandes porque Starlette
+# almacena todo el cuerpo sin comprimir en RAM antes de comprimirlo.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,9 +29,20 @@ app.add_middleware(
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CARPETA_DATOS = os.path.join(BASE_DIR, "Country_per_year")
 CARPETA_CACHES = os.path.join(BASE_DIR, "Cachecountryperyear")
+RUTA_METADATA = os.path.join(CARPETA_CACHES, "metadata_catalogo.json")
 
-# Asegurarnos de que la carpeta de cachés exista
 os.makedirs(CARPETA_CACHES, exist_ok=True)
+
+# Solo metadatos ligeros (~15 KB) residen en RAM; los datos se filtran directo desde Parquet en disco
+CATALOGO = {
+    "paises": [],
+    "anios": [],
+    "instrumentos": [],
+    "satelites": [],
+    "fecha_min": "",
+    "fecha_max": "",
+    "resumen_paises": [],
+}
 
 PAISES_EXCLUIDOS = {
     "french guiana", "guyana francesa", "guyane", "french_guiana", "guyana_francesa",
@@ -34,283 +51,221 @@ PAISES_EXCLUIDOS = {
 NORMALIZACION_PAISES = {
     "brasil": "Brazil", "brazil": "Brazil", "peru": "Peru", "perú": "Peru",
     "mexico": "Mexico", "méxico": "Mexico", "panama": "Panama", "panamá": "Panama",
-    "canada": "Canada", "canadá": "Canada", "usa": "United States", 
+    "canada": "Canada", "canadá": "Canada", "usa": "United States",
     "united states": "United States", "estados unidos": "United States",
     "haiti": "Haiti", "haití": "Haiti", "republica dominicana": "Dominican Republic",
-    "república dominicana": "Dominican Republic", "bolivia": "Bolivia", 
-    "colombia": "Colombia", "argentina": "Argentina", "chile": "Chile", 
-    "ecuador": "Ecuador", "venezuela": "Venezuela", "paraguay": "Paraguay", 
-    "uruguay": "Uruguay", "guatemala": "Guatemala", "honduras": "Honduras", 
-    "el salvador": "El Salvador", "nicaragua": "Nicaragua", "costa rica": "Costa Rica", 
-    "cuba": "Cuba"
+    "república dominicana": "Dominican Republic", "bolivia": "Bolivia",
+    "colombia": "Colombia", "argentina": "Argentina", "chile": "Chile",
+    "ecuador": "Ecuador", "venezuela": "Venezuela", "paraguay": "Paraguay",
+    "uruguay": "Uruguay", "guatemala": "Guatemala", "honduras": "Honduras",
+    "el salvador": "El Salvador", "nicaragua": "Nicaragua", "costa rica": "Costa Rica",
+    "cuba": "Cuba",
 }
 
-TOKENS_RUIDO = {
-    "modis", "viirs", "fire", "dl", "suomi", "noaa", "snpp", "npp", "terra", "aqua",
-    "j1", "j2", "jpss1", "jpss2", "c61", "c6", "nrt", "archive", "final", "clean",
-    "limpio", "v1", "v2", "ok", "copy", "copia", "data", "datos", "incendios",
-    "fires", "filtrado", "filtrados", "filtered", "procesado", "processed", "csv",
-    "latam", "america", "latina", "latinoamerica", "(1)", "(2)", "(3)", "(4)", 
-    "(5)", "(6)", "(7)", "(8)", "(9)", " "
-}
 
-def detectar_separador(ruta_archivo: str) -> str:
-    with open(ruta_archivo, "r", encoding="utf-8-sig", errors="ignore") as f:
-        primera_linea = f.readline()
-    return ";" if primera_linea.count(";") > primera_linea.count(",") else ","
+def optimizar_tipos_df(df: pd.DataFrame, anio_fallback: int) -> pd.DataFrame:
+    """Optimiza tipos numéricos sin perder precisión decimal de coordenadas, FRP o brillo."""
+    out = df.copy()
+    if "anio" not in out.columns:
+        out["anio"] = np.int16(anio_fallback)
+    if "mes" not in out.columns and "fecha" in out.columns and pd.api.types.is_integer_dtype(out["fecha"]):
+        out["mes"] = ((out["fecha"] // 100) % 100).astype("int8")
 
-def limpiar_numerico(serie: pd.Series) -> pd.Series:
-    if serie.dtype == object:
-        serie = serie.astype(str).str.strip().str.replace(",", ".", regex=False)
-    return pd.to_numeric(serie, errors="coerce").replace([np.inf, -np.inf], np.nan)
+    for col in out.select_dtypes(include=["float64"]).columns:
+        out[col] = out[col].astype("float32")
+    for col in ["anio", "mes", "total_incendios"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], downcast="integer")
+    for col in ["pais", "instrumento", "satelite"]:
+        if col in out.columns:
+            out[col] = out[col].astype(str).str.strip()
+    return out
 
-def normalizar_satelite(serie: pd.Series, sensor_defecto: str) -> pd.Series:
-    s = serie.fillna("").astype(str).str.strip()
-    return s.replace({
-        "T": "Terra", "A": "Aqua", "N": "Suomi-NPP", "1": "NOAA-20", "2": "NOAA-21",
-        "": "JPSS-1" if sensor_defecto == "VIIRS" else "Terra"
-    })
 
-def extraer_pais_y_anio(ruta_archivo: str) -> tuple[str, int]:
-    rel_path = os.path.relpath(ruta_archivo, CARPETA_DATOS)
-    partes_ruta = rel_path.split(os.sep)
-    nombre_base = re.sub(r"\s*\(\d+\)$", "", os.path.splitext(partes_ruta[-1])[0]).strip()
-    
-    anio_fallback = 2025
-    tokens_todos = []
-    for segmento in partes_ruta[:-1] + [nombre_base]:
-        tokens_todos.extend(re.split(r"[_\-\s]+", segmento))
-        
-    for tok in tokens_todos:
-        if tok.isdigit() and 2018 <= int(tok) <= 2025:
-            anio_fallback = int(tok)
-            break
+def convertir_pkl_a_parquet_si_falta() -> None:
+    """Migra cachés .pkl.gz a Apache Parquet ordenado (uno por uno para no exceder 512 MB)."""
+    archivos_pkl = sorted(glob.glob(os.path.join(CARPETA_CACHES, "cache_20*.pkl.gz")))
+    for ruta_pkl in archivos_pkl:
+        match = re.search(r"cache_(\d{4})", os.path.basename(ruta_pkl))
+        if not match:
+            continue
+        anio = int(match.group(1))
+        ruta_pq_diario = os.path.join(CARPETA_CACHES, f"cache_{anio}_diario.parquet")
+        ruta_pq_mensual = os.path.join(CARPETA_CACHES, f"cache_{anio}_mensual.parquet")
 
-    tokens_archivo = [t for t in re.split(r"[_\-\s]+", nombre_base) if t and not t.isdigit() and t.lower() not in TOKENS_RUIDO]
-    if tokens_archivo:
-        pais_raw = " ".join(tokens_archivo).strip()
-    else:
-        pais_carpeta = "Desconocido"
-        for carpeta in reversed(partes_ruta[:-1]):
-            t_carp = [t for t in re.split(r"[_\-\s]+", carpeta) if t and not t.isdigit() and t.lower() not in TOKENS_RUIDO]
-            if t_carp:
-                pais_carpeta = " ".join(t_carp).strip()
-                break
-        pais_raw = pais_carpeta
-
-    return NORMALIZACION_PAISES.get(pais_raw.lower(), pais_raw.title()), anio_fallback
-
-def obtener_archivos_validos() -> list[str]:
-    if not os.path.isdir(CARPETA_DATOS): return []
-    return sorted([f for f in glob.glob(os.path.join(CARPETA_DATOS, "**", "*.csv"), recursive=True) if "venv" not in f.lower()])
-
-def obtener_manifiesto_csv(archivos: list[str]) -> list[tuple[str, int, float]]:
-    return [(os.path.relpath(f, BASE_DIR), os.stat(f).st_size, round(os.stat(f).st_mtime, 2)) for f in archivos]
-
-def procesar_todos_los_csv(archivos_csv: list[str], manifiesto: list) -> dict:
-    resumenes_diarios_archivos = []
-
-    for archivo in archivos_csv:
-        rel_display = os.path.relpath(archivo, CARPETA_DATOS)
-        nombre_archivo = os.path.basename(archivo)
-        pais, anio_archivo = extraer_pais_y_anio(archivo)
-
-        if pais.lower() in PAISES_EXCLUIDOS: continue
-
-        sep = detectar_separador(archivo)
-        sensor_archivo = "VIIRS" if "viirs" in archivo.lower() or nombre_archivo.lower().startswith(("suomi", "noaa", "j1", "j2", "snpp")) else "MODIS"
+        if os.path.exists(ruta_pq_diario) and os.path.exists(ruta_pq_mensual):
+            continue
 
         try:
-            header_df = pd.read_csv(archivo, sep=sep, nrows=0)
-        except: continue
+            obj = pd.read_pickle(ruta_pkl, compression="gzip")
+            for tipo, ruta_dest in (("diario", ruta_pq_diario), ("mensual", ruta_pq_mensual)):
+                if not os.path.exists(ruta_dest) and tipo in obj and not obj[tipo].empty:
+                    df_opt = optimizar_tipos_df(obj[tipo], anio)
+                    sort_cols = [c for c in ["pais", "mes", "fecha"] if c in df_opt.columns]
+                    if sort_cols:
+                        df_opt = df_opt.sort_values(sort_cols).reset_index(drop=True)
+                    df_opt.to_parquet(ruta_dest, engine="pyarrow", compression="zstd", index=False)
+                    del df_opt
+            del obj
+            gc.collect()
+            print(f"✅ Caché Parquet listo para {anio}.")
+        except Exception as e:
+            print(f"⚠️ Error migrando {ruta_pkl} a Parquet: {e}")
 
-        header_df.columns = header_df.columns.str.lower().str.strip()
-        lat_col = next((c for c in header_df.columns if c in ["latitude", "lat", "y"] or c.startswith("lat")), None)
-        lon_col = next((c for c in header_df.columns if c in ["longitude", "lon", "long", "x"] or c.startswith("lon")), None)
-        if not lat_col or not lon_col or lat_col == lon_col: continue
 
-        date_col = next((c for c in header_df.columns if "date" in c or "acq_date" in c or "time" in c), None)
-        frp_col = next((c for c in header_df.columns if "frp" in c), None)
-        bright_col = next((c for c in header_df.columns if c in ["brightness", "bright_ti4"] or "bright" in c), None)
-        inst_col = next((c for c in header_df.columns if "instrument" in c or "inst" in c), None)
-        sat_col = next((c for c in header_df.columns if "satellite" in c or "sat" in c), None)
+def construir_o_cargar_catalogo(anios: List[int]) -> None:
+    """Carga o construye un JSON ligero (~15 KB) con países, sensores, fechas y resumen anual."""
+    global CATALOGO
+    if not anios:
+        return
 
-        cols_to_use = [lat_col, lon_col]
-        for col in [date_col, frp_col, bright_col, inst_col, sat_col]:
-            if col and col not in cols_to_use: cols_to_use.append(col)
+    if os.path.exists(RUTA_METADATA):
+        try:
+            with open(RUTA_METADATA, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            if meta.get("anios") == anios and meta.get("paises"):
+                CATALOGO = meta
+                return
+        except Exception:
+            pass
 
-        rename_map = {lat_col: "lat", lon_col: "lon"}
-        if date_col: rename_map[date_col] = "fecha"
-        if frp_col: rename_map[frp_col] = "frp"
-        if bright_col: rename_map[bright_col] = "bright"
-        if inst_col: rename_map[inst_col] = "instrumento"
-        if sat_col: rename_map[sat_col] = "satelite"
+    paises_set, inst_set, sat_set = set(), set(), set()
+    fechas_min, fechas_max = [], []
+    resumen_total = []
 
-        print(f"Procesando: {rel_display} -> País: {pais} | Año: {anio_archivo}")
-        chunks_archivo = []
+    for anio in anios:
+        ruta_m = os.path.join(CARPETA_CACHES, f"cache_{anio}_mensual.parquet")
+        ruta_d = os.path.join(CARPETA_CACHES, f"cache_{anio}_diario.parquet")
 
-        reader = pd.read_csv(archivo, sep=sep, usecols=lambda c: c.lower().strip() in cols_to_use, chunksize=250_000, low_memory=False, on_bad_lines="skip")
-        
-        for chunk in reader:
-            chunk.columns = chunk.columns.str.lower().str.strip()
-            chunk = chunk.rename(columns=rename_map).loc[:, ~chunk.columns.duplicated()]
+        if os.path.exists(ruta_m):
+            cols_m = [c for c in ["pais", "anio", "instrumento", "satelite", "total_incendios", "frp_promedio", "brillo_promedio"] if c in pq.read_schema(ruta_m).names]
+            df_m = pq.read_table(ruta_m, columns=cols_m).to_pandas()
+            if not df_m.empty:
+                paises_set.update(df_m["pais"].dropna().astype(str).unique())
+                if "instrumento" in df_m.columns:
+                    inst_set.update(df_m["instrumento"].dropna().astype(str).unique())
+                if "satelite" in df_m.columns:
+                    sat_set.update(df_m["satelite"].dropna().astype(str).unique())
 
-            chunk["lat"] = limpiar_numerico(chunk["lat"]).astype("float32")
-            chunk["lon"] = limpiar_numerico(chunk["lon"]).astype("float32")
-            chunk = chunk.dropna(subset=["lat", "lon"])
-            chunk = chunk[(chunk["lat"].between(-90.0, 90.0)) & (chunk["lon"].between(-180.0, 180.0))]
-            if chunk.empty: continue
+                res = (
+                    df_m.groupby(["pais", "anio"], observed=True)
+                    .agg(
+                        total_incendios=("total_incendios", "sum"),
+                        frp_promedio=("frp_promedio", "mean"),
+                        brillo_promedio=("brillo_promedio", "mean"),
+                    )
+                    .reset_index()
+                    .fillna(0)
+                )
+                res["pais"] = res["pais"].astype(str)
+                res["anio"] = res["anio"].astype(int)
+                res["total_incendios"] = res["total_incendios"].astype(int)
+                res["frp_promedio"] = res["frp_promedio"].astype("float64").round(1)
+                res["brillo_promedio"] = res["brillo_promedio"].astype("float64").round(1)
+                resumen_total.extend(res.to_dict(orient="records"))
+            del df_m
 
-            chunk["frp"] = limpiar_numerico(chunk["frp"]).fillna(0.0).astype("float32") if "frp" in chunk.columns else 0.0
-            chunk["bright"] = limpiar_numerico(chunk["bright"]).fillna(0.0).astype("float32") if "bright" in chunk.columns else 0.0
+        if os.path.exists(ruta_d) and "fecha" in pq.read_schema(ruta_d).names:
+            df_f = pq.read_table(ruta_d, columns=["fecha"]).to_pandas()
+            if not df_f.empty:
+                f_str = df_f["fecha"].astype(str)
+                fechas_min.append(f_str.min())
+                fechas_max.append(f_str.max())
+            del df_f
 
-            if "instrumento" in chunk.columns:
-                inst = chunk["instrumento"].fillna(sensor_archivo).astype(str).str.strip()
-                chunk["instrumento"] = np.where(inst.str.upper().str.contains("VIIRS"), "VIIRS", "MODIS")
-            else:
-                chunk["instrumento"] = sensor_archivo
-
-            chunk["satelite"] = normalizar_satelite(chunk["satelite"], sensor_archivo) if "satelite" in chunk.columns else ("JPSS-1" if sensor_archivo == "VIIRS" else "Terra")
-
-            if "fecha" in chunk.columns:
-                fechas_dt = pd.to_datetime(chunk["fecha"], format="mixed", errors="coerce")
-                chunk["anio"] = fechas_dt.dt.year.fillna(anio_archivo).astype("int16")
-                chunk["mes"] = fechas_dt.dt.month.fillna(1).astype("int8").clip(1, 12)
-                chunk["fecha"] = fechas_dt.dt.strftime("%Y-%m-%d").fillna(f"{anio_archivo}-01-01")
-            else:
-                chunk["anio"] = anio_archivo
-                chunk["mes"] = 1
-                chunk["fecha"] = f"{anio_archivo}-01-01"
-
-            chunk = chunk[(chunk["anio"] >= 2018) & (chunk["anio"] <= 2025)]
-            if chunk.empty: continue
-
-            chunk["lat_grid"], chunk["lon_grid"] = chunk["lat"].round(2), chunk["lon"].round(2)
-
-            chunks_archivo.append(
-                chunk.groupby(["anio", "mes", "fecha", "lat_grid", "lon_grid", "instrumento", "satelite"], observed=True)
-                .agg(total_incendios=("lat", "count"), suma_frp=("frp", "sum"), suma_brillo=("bright", "sum")).reset_index()
-            )
-
-        if chunks_archivo:
-            df_file = pd.concat(chunks_archivo, ignore_index=True).groupby(["anio", "mes", "fecha", "lat_grid", "lon_grid", "instrumento", "satelite"], observed=True).agg(total_incendios=("total_incendios", "sum"), suma_frp=("suma_frp", "sum"), suma_brillo=("suma_brillo", "sum")).reset_index()
-            df_file["pais"] = pais
-            resumenes_diarios_archivos.append(df_file)
-
-        del chunks_archivo
         gc.collect()
 
-    if not resumenes_diarios_archivos:
-        raise ValueError(f"❌ No se encontraron registros válidos dentro de '{CARPETA_DATOS}'.")
+    f_min = min(fechas_min) if fechas_min else f"{anios[0]}0101"
+    f_max = max(fechas_max) if fechas_max else f"{anios[-1]}1231"
 
-    print("Consolidando bases y optimizando caché anual...")
-    df_all = pd.concat(resumenes_diarios_archivos, ignore_index=True)
-    del resumenes_diarios_archivos
-    gc.collect()
+    CATALOGO = {
+        "paises": sorted(p for p in paises_set if p and p.lower() not in PAISES_EXCLUIDOS),
+        "anios": anios,
+        "instrumentos": sorted(inst_set),
+        "satelites": sorted(sat_set),
+        "fecha_min": f"{f_min[:4]}-{f_min[4:6]}-{f_min[6:8]}" if len(f_min) == 8 else f_min,
+        "fecha_max": f"{f_max[:4]}-{f_max[4:6]}-{f_max[6:8]}" if len(f_max) == 8 else f_max,
+        "resumen_paises": resumen_total,
+    }
 
-    diario = df_all.groupby(["pais", "anio", "mes", "fecha", "lat_grid", "lon_grid", "instrumento", "satelite"], observed=True).agg(total_incendios=("total_incendios", "sum"), suma_frp=("suma_frp", "sum"), suma_brillo=("suma_brillo", "sum")).reset_index()
-    del df_all
-    gc.collect()
-
-    mensual = diario.groupby(["pais", "anio", "mes", "lat_grid", "lon_grid", "instrumento", "satelite"], observed=True).agg(total_incendios=("total_incendios", "sum"), suma_frp=("suma_frp", "sum"), suma_brillo=("suma_brillo", "sum"), fecha=("fecha", "max")).reset_index()
-
-    for tabla in (diario, mensual):
-        tot_safe = tabla["total_incendios"].replace(0, 1)
-        tabla["frp_promedio"] = (tabla["suma_frp"] / tot_safe).round(1).fillna(0.0).astype("float32")
-        tabla["brillo_promedio"] = (tabla["suma_brillo"] / tot_safe).round(1).fillna(0.0).astype("float32")
-        tabla.drop(columns=["suma_frp", "suma_brillo"], inplace=True)
-
-        tabla["lat_grid"], tabla["lon_grid"] = tabla["lat_grid"].round(2).astype("float32"), tabla["lon_grid"].round(2).astype("float32")
-        tabla["total_incendios"] = tabla["total_incendios"].astype("int32")
-        tabla["anio"], tabla["mes"] = tabla["anio"].astype("int16"), tabla["mes"].astype("int8")
-        
-        tabla["fecha"] = tabla["fecha"].astype(str).str.replace("-", "", regex=False).astype("int32")
-
-        for col_cat in ["pais", "instrumento", "satelite"]: tabla[col_cat] = tabla[col_cat].astype("category")
-
-    diario = diario.sort_values("total_incendios", ascending=False).reset_index(drop=True)
-    mensual = mensual.sort_values("total_incendios", ascending=False).reset_index(drop=True)
-
-    anios_presentes = diario["anio"].unique()
-    for anio_actual in anios_presentes:
-        d_anio = diario[diario["anio"] == anio_actual]
-        m_anio = mensual[mensual["anio"] == anio_actual]
-        ruta = os.path.join(CARPETA_CACHES, f"cache_{anio_actual}.pkl.gz")
-        pd.to_pickle({"manifiesto": manifiesto, "diario": d_anio, "mensual": m_anio}, ruta, compression="gzip")
-        print(f"💾 Caché guardado: {ruta}")
-
-    return {"diario": diario, "mensual": mensual}
-
-
-# --- INICIALIZACIÓN INTELIGENTE ---
-try:
-    archivos_encontrados = obtener_archivos_validos()
-    manifiesto_actual = obtener_manifiesto_csv(archivos_encontrados)
-except:
-    archivos_encontrados, manifiesto_actual = [], []
-
-hay_csvs_locales = len(archivos_encontrados) > 0
-archivos_cache = sorted(glob.glob(os.path.join(CARPETA_CACHES, "cache_20*.pkl.gz")))
-
-requiere_actualizacion = True
-cache_cargado = None
-
-if archivos_cache:
     try:
-        print(f"☁️ Uniendo {len(archivos_cache)} archivos de caché anuales desde 'Cachecountryperyear'...")
-        diarios_list, mensuales_list = [], []
-        manif_guardado = None
-        
-        for arch in archivos_cache:
-            obj = pd.read_pickle(arch)
-            diarios_list.append(obj["diario"])
-            mensuales_list.append(obj["mensual"])
-            manif_guardado = obj.get("manifiesto")
-            
-        cache_cargado = {
-            "diario": pd.concat(diarios_list, ignore_index=True),
-            "mensual": pd.concat(mensuales_list, ignore_index=True)
-        }
-        
-        if not hay_csvs_locales:
-            print("☁️ Modo Nube: Cachés unidos exitosamente.")
-            requiere_actualizacion = False
-        elif manif_guardado == manifiesto_actual:
-            print("⚡ Cachés anuales sincronizados. Arrancando rápido...")
-            requiere_actualizacion = False
-    except Exception as e:
-        print(f"⚠️ Error leyendo cachés: {e}")
-
-if requiere_actualizacion:
-    if not hay_csvs_locales and not archivos_cache:
-        raise FileNotFoundError("❌ No se encontraron cachés anuales ni archivos CSV.")
-    if archivos_cache and hay_csvs_locales:
-        if input("\n⚠️ Detectados cambios en 'Country_per_year'. ¿Regenerar cachés? (s/n): ").strip().lower() == "s":
-            cache_cargado = procesar_todos_los_csv(archivos_encontrados, manifiesto_actual)
-    elif hay_csvs_locales:
-        print("🔄 Creando cachés anuales por primera vez...")
-        cache_cargado = procesar_todos_los_csv(archivos_encontrados, manifiesto_actual)
-
-zonas_diario: pd.DataFrame = cache_cargado["diario"]
-zonas_mensual: pd.DataFrame = cache_cargado["mensual"]
-
-resumen_paises = zonas_mensual.groupby(["pais", "anio"], observed=True).agg(total_incendios=("total_incendios", "sum"), frp_promedio=("frp_promedio", "mean"), brillo_promedio=("brillo_promedio", "mean")).reset_index().fillna(0)
-resumen_paises["pais"] = resumen_paises["pais"].astype(str)
-for col in ["frp_promedio", "brillo_promedio"]: resumen_paises[col] = resumen_paises[col].astype("float64").round(1)
-
-CACHE_PAISES = resumen_paises.to_dict(orient="records")
-PAISES_CARGADOS = sorted(zonas_mensual["pais"].astype(str).unique().tolist())
-ANIOS_CARGADOS = sorted(int(a) for a in zonas_mensual["anio"].unique().tolist())
-
-print(f"✅ ¡Servidor listo! Celdas mensuales: {len(zonas_mensual):,} | Registros diarios: {len(zonas_diario):,}\n🌎 Países ({len(PAISES_CARGADOS)}): {PAISES_CARGADOS} | Años: {ANIOS_CARGADOS}")
+        with open(RUTA_METADATA, "w", encoding="utf-8") as f:
+            json.dump(CATALOGO, f, ensure_ascii=False)
+    except Exception:
+        pass
 
 
-def serializar_limpio(df_slice: pd.DataFrame) -> list[dict]:
-    if df_slice.empty: return []
+def inicializar_api() -> None:
+    convertir_pkl_a_parquet_si_falta()
+    archivos_pq = sorted(glob.glob(os.path.join(CARPETA_CACHES, "cache_20*_mensual.parquet")))
+    anios = sorted([int(re.search(r"cache_(\d{4})", os.path.basename(f)).group(1)) for f in archivos_pq])
+    construir_o_cargar_catalogo(anios)
+    print(f"🚀 API activa en modo bajo consumo (<100 MB RAM). Años indexados: {CATALOGO['anios']}")
+
+
+inicializar_api()
+
+
+def _resolver_nombre_pais(pais: Optional[str]) -> Optional[str]:
+    if not pais or pais.lower() == "todos":
+        return None
+    norm = NORMALIZACION_PAISES.get(pais.strip().lower(), pais.strip())
+    for p_cat in CATALOGO["paises"]:
+        if p_cat.lower() == norm.lower():
+            return p_cat
+    return norm
+
+
+def leer_parquet_filtrado(
+    anio: int,
+    tipo: str,
+    pais: Optional[str] = None,
+    mes: Optional[int] = None,
+    fecha: Optional[str] = None,
+    fecha_inicio: Optional[str] = None,
+    fecha_fin: Optional[str] = None,
+    instrumento: Optional[str] = None,
+    columnas: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """Lee únicamente las filas y columnas necesarias desde disco usando predicate pushdown."""
+    ruta = os.path.join(CARPETA_CACHES, f"cache_{anio}_{tipo}.parquet")
+    if not os.path.exists(ruta):
+        return pd.DataFrame()
+
+    schema_cols = set(pq.read_schema(ruta).names)
+    filtros = []
+
+    pais_real = _resolver_nombre_pais(pais)
+    if pais_real and "pais" in schema_cols:
+        filtros.append(("pais", "==", pais_real))
+    if mes and 1 <= mes <= 12 and "mes" in schema_cols:
+        filtros.append(("mes", "==", int(mes)))
+    if instrumento and instrumento.lower() != "todos" and "instrumento" in schema_cols:
+        filtros.append(("instrumento", "==", instrumento.upper()))
+
+    if tipo == "diario" and "fecha" in schema_cols:
+        if fecha:
+            filtros.append(("fecha", "==", int(fecha.replace("-", ""))))
+        if fecha_inicio:
+            filtros.append(("fecha", ">=", int(fecha_inicio.replace("-", ""))))
+        if fecha_fin:
+            filtros.append(("fecha", "<=", int(fecha_fin.replace("-", ""))))
+
+    cols_validas = [c for c in columnas if c in schema_cols] if columnas else None
+    tabla = pq.read_table(ruta, columns=cols_validas, filters=filtros if filtros else None)
+    df = tabla.to_pandas()
+    del tabla
+    return df
+
+
+def preparar_salida(df_slice: pd.DataFrame) -> pd.DataFrame:
+    if df_slice.empty:
+        return df_slice
     out = df_slice.copy()
 
-    for col in out.select_dtypes(include=["category"]).columns: out[col] = out[col].astype(str)
-    
+    for col in out.select_dtypes(include=["category"]).columns:
+        out[col] = out[col].astype(str)
+
     if "fecha" in out.columns and pd.api.types.is_integer_dtype(out["fecha"]):
         f_str = out["fecha"].astype(str)
         out["fecha"] = f_str.str.slice(0, 4) + "-" + f_str.str.slice(4, 6) + "-" + f_str.str.slice(6, 8)
@@ -318,77 +273,217 @@ def serializar_limpio(df_slice: pd.DataFrame) -> list[dict]:
     if "total_incendios" in out.columns:
         t = out["total_incendios"].to_numpy()
         out["nivel_riesgo"] = np.select([t > 50, t > 15], ["Alto", "Medio"], default="Bajo")
-        out["color"] = np.select([t > 75, t > 60, t > 50, t > 15], ["#FF0000", "#FF8000", "#FFFF00", "#80FF00"], default="#2ECC71")
+        out["color"] = np.select(
+            [t > 75, t > 60, t > 50, t > 15],
+            ["#FF0000", "#FF8000", "#FFFF00", "#80FF00"],
+            default="#2ECC71",
+        )
 
     for col in ["lat_grid", "lon_grid"]:
-        if col in out.columns: out[col] = out[col].astype("float64").round(2)
+        if col in out.columns:
+            out[col] = np.round(out[col].astype("float64"), 2)
     for col in ["frp_promedio", "brillo_promedio"]:
-        if col in out.columns: out[col] = out[col].astype("float64").round(1)
+        if col in out.columns:
+            out[col] = np.round(out[col].astype("float64"), 1)
 
-    return out.replace([np.inf, -np.inf], np.nan).fillna(0).to_dict(orient="records")
+    return out.replace([np.inf, -np.inf], np.nan).fillna(0)
+
+
+def _iter_json_records(df_out: pd.DataFrame, chunk_size: int = 4000) -> Iterator[str]:
+    """Serializa el DataFrame en bloques pequeños para evitar picos de RAM al enviar JSON."""
+    if df_out.empty:
+        yield "[]"
+        return
+
+    cols = list(df_out.columns)
+    n_rows = len(df_out)
+    yield "["
+    first = True
+    for start in range(0, n_rows, chunk_size):
+        sub = df_out.iloc[start : start + chunk_size]
+        arrays = [sub[c].tolist() for c in cols]
+        chunk_json = ",".join(
+            json.dumps(dict(zip(cols, row_vals)), ensure_ascii=False, separators=(",", ":"))
+            for row_vals in zip(*arrays)
+        )
+        if first:
+            yield chunk_json
+            first = False
+        else:
+            yield "," + chunk_json
+    yield "]"
+    del df_out
+    gc.collect()
+
+
+def construir_respuesta(df_out: pd.DataFrame, request: Request, formato: Optional[str] = None) -> Response:
+    accept_header = request.headers.get("accept", "")
+    quiere_parquet = (formato and formato.lower() == "parquet") or ("application/vnd.apache.parquet" in accept_header)
+
+    if quiere_parquet:
+        buf = io.BytesIO()
+        df_out.to_parquet(buf, engine="pyarrow", compression="snappy", index=False)
+        contenido = buf.getvalue()
+        del df_out
+        gc.collect()
+        return Response(
+            content=contenido,
+            media_type="application/vnd.apache.parquet",
+            headers={"X-Data-Format": "parquet"},
+        )
+
+    return StreamingResponse(_iter_json_records(df_out), media_type="application/json")
 
 
 # --- ENDPOINTS ---
 @app.get("/")
 def home():
     return {
-        "status": "API LATAM/América Optimizada activa 🚀",
-        "paises_indexados": len(PAISES_CARGADOS),
-        "paises": PAISES_CARGADOS, "anios": ANIOS_CARGADOS,
-        "total_registros_diarios": len(zonas_diario)
+        "status": "API LATAM/América Optimizada (Parquet Stream) activa 🚀",
+        "paises_indexados": len(CATALOGO["paises"]),
+        "paises": CATALOGO["paises"],
+        "anios": CATALOGO["anios"],
+        "modo_memoria": "disk-pushdown-512mb",
     }
+
 
 @app.get("/api/filtros-disponibles")
 def get_filtros_disponibles():
-    fechas = zonas_diario["fecha"].astype(str)
-    f_min, f_max = (fechas.min(), fechas.max()) if not fechas.empty else ("20180101", "20251231")
     return {
-        "paises": PAISES_CARGADOS, "anios": ANIOS_CARGADOS, "meses": list(range(1, 13)),
-        "fecha_min": f"{f_min[:4]}-{f_min[4:6]}-{f_min[6:8]}", "fecha_max": f"{f_max[:4]}-{f_max[4:6]}-{f_max[6:8]}",
-        "instrumentos": sorted(zonas_mensual["instrumento"].astype(str).unique().tolist()),
-        "satelites": sorted(zonas_mensual["satelite"].astype(str).unique().tolist()),
+        "paises": CATALOGO["paises"],
+        "anios": CATALOGO["anios"],
+        "meses": list(range(1, 13)),
+        "fecha_min": CATALOGO["fecha_min"],
+        "fecha_max": CATALOGO["fecha_max"],
+        "instrumentos": CATALOGO["instrumentos"],
+        "satelites": CATALOGO["satelites"],
     }
 
-@app.get("/api/incendios-grid")
-def get_mapa_incendios(pais: str = None, anio: int = None, mes: int = None, fecha: str = None, fecha_inicio: str = None, fecha_fin: str = None, instrumento: str = None, limit: int = Query(default=45000, le=200000)):
-    usa_diario = bool(fecha or fecha_inicio or fecha_fin)
-    df_out = zonas_diario if usa_diario else zonas_mensual
 
-    if anio: df_out = df_out[df_out["anio"] == anio]
-    if pais and pais.lower() != "todos": df_out = df_out[df_out["pais"].astype(str).str.lower() == pais.lower()]
-    if mes and 1 <= mes <= 12: df_out = df_out[df_out["mes"] == mes]
-    if instrumento and instrumento.lower() != "todos": df_out = df_out[df_out["instrumento"].astype(str).str.upper() == instrumento.upper()]
-    
-    if fecha: df_out = df_out[df_out["fecha"] == int(fecha.replace("-", ""))]
-    if fecha_inicio: df_out = df_out[df_out["fecha"] >= int(fecha_inicio.replace("-", ""))]
-    if fecha_fin: df_out = df_out[df_out["fecha"] <= int(fecha_fin.replace("-", ""))]
+@app.get("/api/incendios-grid")
+def get_mapa_incendios(
+    request: Request,
+    pais: str = None,
+    anio: int = None,
+    mes: int = None,
+    fecha: str = None,
+    fecha_inicio: str = None,
+    fecha_fin: str = None,
+    instrumento: str = None,
+    formato: str = None,
+    limit: int = Query(default=45000, le=200000),
+):
+    usa_diario = bool(fecha or fecha_inicio or fecha_fin)
+    tipo = "diario" if usa_diario else "mensual"
+
+    if anio:
+        anios_objetivo = [int(anio)]
+    elif fecha:
+        anios_objetivo = [int(fecha[:4])]
+    elif fecha_inicio or fecha_fin:
+        y_ini = int(fecha_inicio[:4]) if fecha_inicio else min(CATALOGO["anios"] or [2018])
+        y_fin = int(fecha_fin[:4]) if fecha_fin else max(CATALOGO["anios"] or [2025])
+        anios_objetivo = [y for y in CATALOGO["anios"] if y_ini <= y <= y_fin]
+    else:
+        anios_objetivo = list(CATALOGO["anios"])
+
+    if not anios_objetivo:
+        return construir_respuesta(pd.DataFrame(), request, formato)
+
+    partes = []
+    cuota_por_anio = max(1, limit // len(anios_objetivo)) if len(anios_objetivo) > 1 else limit
+
+    for y in anios_objetivo:
+        df_y = leer_parquet_filtrado(
+            anio=y,
+            tipo=tipo,
+            pais=pais,
+            mes=mes,
+            fecha=fecha,
+            fecha_inicio=fecha_inicio,
+            fecha_fin=fecha_fin,
+            instrumento=instrumento,
+        )
+        if df_y.empty:
+            continue
+        if len(anios_objetivo) > 1 and len(df_y) > cuota_por_anio:
+            df_y = df_y.head(cuota_por_anio)
+        partes.append(df_y)
+
+    if not partes:
+        return construir_respuesta(pd.DataFrame(), request, formato)
+
+    df_out = pd.concat(partes, ignore_index=True) if len(partes) > 1 else partes[0]
+    del partes
 
     if len(df_out) > limit:
         if (not pais or pais.lower() == "todos") and not anio and not mes:
-            df_out = df_out.groupby(["pais", "anio"], group_keys=False, observed=True).head(max(1, limit // max(1, df_out.groupby(["pais", "anio"], observed=True).ngroups)))
+            n_grp = max(1, df_out.groupby(["pais", "anio"], observed=True).ngroups)
+            df_out = df_out.groupby(["pais", "anio"], group_keys=False, observed=True).head(max(1, limit // n_grp))
         elif not pais or pais.lower() == "todos":
-            df_out = df_out.groupby("pais", group_keys=False, observed=True).head(max(1, limit // max(1, df_out["pais"].nunique())))
+            n_grp = max(1, df_out["pais"].nunique())
+            df_out = df_out.groupby("pais", group_keys=False, observed=True).head(max(1, limit // n_grp))
         else:
             df_out = df_out.head(limit)
 
-    return serializar_limpio(df_out)
+    df_final = preparar_salida(df_out)
+    del df_out
+    return construir_respuesta(df_final, request, formato)
+
 
 @app.get("/api/incendios-por-pais")
 def get_resumen_por_pais(anio: int = None):
-    return [r for r in CACHE_PAISES if r["anio"] == anio] if anio else CACHE_PAISES
+    resumen = CATALOGO["resumen_paises"]
+    if anio:
+        return [r for r in resumen if int(r.get("anio", 0)) == int(anio)]
+    return resumen
+
 
 @app.get("/api/incendios-por-tiempo")
-def get_resumen_temporal(granularidad: str = Query(default="mes", pattern="^(anio|mes|fecha)$"), pais: str = None, anio: int = None):
-    df_t = zonas_diario if granularidad == "fecha" else zonas_mensual
-    if pais and pais.lower() != "todos": df_t = df_t[df_t["pais"].astype(str).str.lower() == pais.lower()]
-    if anio: df_t = df_t[df_t["anio"] == anio]
+def get_resumen_temporal(
+    request: Request,
+    granularidad: str = Query(default="mes", pattern="^(anio|mes|fecha)$"),
+    pais: str = None,
+    anio: int = None,
+    formato: str = None,
+):
+    tipo = "diario" if granularidad == "fecha" else "mensual"
+    anios_objetivo = [int(anio)] if anio else list(CATALOGO["anios"])
 
     cols_grupo = ["anio"] if granularidad == "anio" else (["anio", "mes"] if granularidad == "mes" else ["fecha"])
-    if pais and pais.lower() != "todos": cols_grupo = ["pais"] + cols_grupo
+    if pais and pais.lower() != "todos":
+        cols_grupo = ["pais"] + cols_grupo
 
-    res = df_t.groupby(cols_grupo, observed=True).agg(total_incendios=("total_incendios", "sum"), frp_promedio=("frp_promedio", "mean"), brillo_promedio=("brillo_promedio", "mean")).reset_index().sort_values(cols_grupo)
-    return serializar_limpio(res)
+    cols_lectura = list(dict.fromkeys(cols_grupo + ["total_incendios", "frp_promedio", "brillo_promedio"]))
+    agregados = []
+
+    for y in anios_objetivo:
+        df_t = leer_parquet_filtrado(anio=y, tipo=tipo, pais=pais, columnas=cols_lectura)
+        if df_t.empty:
+            continue
+        res_y = (
+            df_t.groupby(cols_grupo, observed=True)
+            .agg(
+                total_incendios=("total_incendios", "sum"),
+                frp_promedio=("frp_promedio", "mean"),
+                brillo_promedio=("brillo_promedio", "mean"),
+            )
+            .reset_index()
+        )
+        agregados.append(res_y)
+        del df_t
+        gc.collect()
+
+    if not agregados:
+        return construir_respuesta(pd.DataFrame(), request, formato)
+
+    res = pd.concat(agregados, ignore_index=True).sort_values(cols_grupo).reset_index(drop=True)
+    del agregados
+    df_final = preparar_salida(res)
+    del res
+    return construir_respuesta(df_final, request, formato)
+
 
 if __name__ == "__main__":
-    module_name = os.path.splitext(os.path.basename(__file__))[0]
-    uvicorn.run(f"{module_name}:app", host="0.0.0.0", port=8000, reload=False)
+    puerto = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=puerto, workers=1, reload=False)
