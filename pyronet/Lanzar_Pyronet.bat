@@ -83,18 +83,22 @@ if not exist "venv\Scripts\python.exe" (
 echo [OK] Entorno virtual listo.
 echo.
 
-REM 3. Verificar librerias (solo instala si faltan, mostrando progreso)
+REM 3. Verificar librerias con timeout extendido y reintentos automaticos
 echo [3/5] Verificando librerias de trabajo...
 venv\Scripts\python.exe -c "import streamlit, pydeck, pandas, numpy, requests, altair, plotly, openpyxl" >nul 2>&1
 if !errorlevel! equ 0 (
     echo [OK] Librerias ya instaladas.
 ) else (
     echo Instalando librerias necesarias ^(solo ocurre la primera vez^)...
-    venv\Scripts\python.exe -m pip install --disable-pip-version-check streamlit pydeck pandas numpy requests altair plotly openpyxl
+    venv\Scripts\python.exe -m pip install --default-timeout=120 --retries 10 --prefer-binary --disable-pip-version-check streamlit pydeck pandas numpy requests altair plotly openpyxl
+    if !errorlevel! neq 0 (
+        echo [AVISO] Corte de red detectado. Reintentando descarga...
+        venv\Scripts\python.exe -m pip install --default-timeout=180 --retries 15 --prefer-binary --disable-pip-version-check streamlit pydeck pandas numpy requests altair plotly openpyxl
+    )
     if !errorlevel! neq 0 (
         color 0C
-        echo [ERROR] Hubo un problema instalando las librerias.
-        echo Si esta carpeta esta dentro de OneDrive, muevela a C:\Pyronet e intenta de nuevo.
+        echo [ERROR] No se pudieron descargar las librerias por inestabilidad en la conexion a internet.
+        echo Verifica tu Wi-Fi y vuelve a ejecutar este archivo para reanudar la descarga.
         pause
         exit /b 1
     )
@@ -105,7 +109,7 @@ echo.
 REM 4. Comprobar estado de pyronet-api en FastAPI Cloud
 echo [4/5] Conectando con Pyronet API ^(FastAPI Cloud^)...
 set "MODO_NUBE=0"
-curl.exe -s --fail --max-time 8 "%CLOUD_API_BASE%/health" >nul 2>&1
+curl.exe -s --fail --max-time 10 "%CLOUD_API_BASE%/health" >nul 2>&1
 if !errorlevel! equ 0 (
     set "MODO_NUBE=1"
     set "INCENDIOS_API_URL=%CLOUD_API_GRID%"
@@ -141,7 +145,7 @@ if "!MODO_NUBE!"=="0" (
     venv\Scripts\python.exe -c "import fastapi, uvicorn, pyarrow" >nul 2>&1
     if !errorlevel! neq 0 (
         echo Instalando dependencias del servidor local...
-        venv\Scripts\python.exe -m pip install --disable-pip-version-check fastapi uvicorn pyarrow
+        venv\Scripts\python.exe -m pip install --default-timeout=120 --retries 10 --prefer-binary --disable-pip-version-check fastapi uvicorn pyarrow
     )
 
     if not exist "!BACKEND_DIR!\Cachecountryperyear" mkdir "!BACKEND_DIR!\Cachecountryperyear"
