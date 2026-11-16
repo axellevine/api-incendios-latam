@@ -1,0 +1,712 @@
+{
+  "paises": [
+    "Argentina",
+    "Bolivia",
+    "Brazil",
+    "Chile",
+    "Colombia",
+    "Ecuador",
+    "Guyana",
+    "Paraguay",
+    "Peru",
+    "Suriname",
+    "Uruguay",
+    "Venezuela"
+  ],
+  "anios": [
+    2018,
+    2019,
+    2020,
+    2021,
+    2022,
+    2023,
+    2024,
+    2025
+  ],
+  "instrumentos": [
+    "MODIS",
+    "VIIRS"
+  ],
+  "satelites": [
+    "Aqua",
+    "N20",
+    "SNPP",
+    "Terra"
+  ],
+  "fecha_min": "2018-01-01",
+  "fecha_max": "2025-12-31",
+  "resumen_paises": [
+    {
+      "pais": "Argentina",
+      "anio": 2018,
+      "total_incendios": 328229,
+      "frp_promedio": 20.9,
+      "brillo_promedio": 334.7
+    },
+    {
+      "pais": "Bolivia",
+      "anio": 2018,
+      "total_incendios": 353177,
+      "frp_promedio": 16.3,
+      "brillo_promedio": 332.7
+    },
+    {
+      "pais": "Brazil",
+      "anio": 2018,
+      "total_incendios": 1760275,
+      "frp_promedio": 16.1,
+      "brillo_promedio": 334.5
+    },
+    {
+      "pais": "Chile",
+      "anio": 2018,
+      "total_incendios": 37125,
+      "frp_promedio": 15.9,
+      "brillo_promedio": 330.9
+    },
+    {
+      "pais": "Colombia",
+      "anio": 2018,
+      "total_incendios": 180262,
+      "frp_promedio": 16.2,
+      "brillo_promedio": 335.3
+    },
+    {
+      "pais": "Ecuador",
+      "anio": 2018,
+      "total_incendios": 52668,
+      "frp_promedio": 18.5,
+      "brillo_promedio": 336.1
+    },
+    {
+      "pais": "Guyana",
+      "anio": 2018,
+      "total_incendios": 13275,
+      "frp_promedio": 8.2,
+      "brillo_promedio": 335.1
+    },
+    {
+      "pais": "Paraguay",
+      "anio": 2018,
+      "total_incendios": 198334,
+      "frp_promedio": 14.1,
+      "brillo_promedio": 333.6
+    },
+    {
+      "pais": "Peru",
+      "anio": 2018,
+      "total_incendios": 123566,
+      "frp_promedio": 11.2,
+      "brillo_promedio": 335.6
+    },
+    {
+      "pais": "Suriname",
+      "anio": 2018,
+      "total_incendios": 4551,
+      "frp_promedio": 9.2,
+      "brillo_promedio": 333.8
+    },
+    {
+      "pais": "Uruguay",
+      "anio": 2018,
+      "total_incendios": 4352,
+      "frp_promedio": 8.9,
+      "brillo_promedio": 333.3
+    },
+    {
+      "pais": "Venezuela",
+      "anio": 2018,
+      "total_incendios": 404997,
+      "frp_promedio": 13.1,
+      "brillo_promedio": 334.6
+    },
+    {
+      "pais": "Argentina",
+      "anio": 2019,
+      "total_incendios": 328546,
+      "frp_promedio": 18.9,
+      "brillo_promedio": 334.6
+    },
+    {
+      "pais": "Bolivia",
+      "anio": 2019,
+      "total_incendios": 773606,
+      "frp_promedio": 21.0,
+      "brillo_promedio": 333.3
+    },
+    {
+      "pais": "Brazil",
+      "anio": 2019,
+      "total_incendios": 2885087,
+      "frp_promedio": 18.2,
+      "brillo_promedio": 334.4
+    },
+    {
+      "pais": "Chile",
+      "anio": 2019,
+      "total_incendios": 49819,
+      "frp_promedio": 20.6,
+      "brillo_promedio": 331.8
+    },
+    {
+      "pais": "Colombia",
+      "anio": 2019,
+      "total_incendios": 240769,
+      "frp_promedio": 12.8,
+      "brillo_promedio": 335.5
+    },
+    {
+      "pais": "Ecuador",
+      "anio": 2019,
+      "total_incendios": 26245,
+      "frp_promedio": 9.6,
+      "brillo_promedio": 335.5
+    },
+    {
+      "pais": "Guyana",
+      "anio": 2019,
+      "total_incendios": 21310,
+      "frp_promedio": 8.5,
+      "brillo_promedio": 333.7
+    },
+    {
+      "pais": "Paraguay",
+      "anio": 2019,
+      "total_incendios": 295280,
+      "frp_promedio": 19.8,
+      "brillo_promedio": 335.3
+    },
+    {
+      "pais": "Peru",
+      "anio": 2019,
+      "total_incendios": 153301,
+      "frp_promedio": 11.7,
+      "brillo_promedio": 335.6
+    },
+    {
+      "pais": "Suriname",
+      "anio": 2019,
+      "total_incendios": 7040,
+      "frp_promedio": 8.6,
+      "brillo_promedio": 333.0
+    },
+    {
+      "pais": "Uruguay",
+      "anio": 2019,
+      "total_incendios": 6225,
+      "frp_promedio": 8.7,
+      "brillo_promedio": 333.4
+    },
+    {
+      "pais": "Venezuela",
+      "anio": 2019,
+      "total_incendios": 642021,
+      "frp_promedio": 11.7,
+      "brillo_promedio": 334.0
+    },
+    {
+      "pais": "Argentina",
+      "anio": 2020,
+      "total_incendios": 889379,
+      "frp_promedio": 19.7,
+      "brillo_promedio": 335.4
+    },
+    {
+      "pais": "Bolivia",
+      "anio": 2020,
+      "total_incendios": 628607,
+      "frp_promedio": 16.5,
+      "brillo_promedio": 333.5
+    },
+    {
+      "pais": "Brazil",
+      "anio": 2020,
+      "total_incendios": 3274780,
+      "frp_promedio": 19.3,
+      "brillo_promedio": 334.5
+    },
+    {
+      "pais": "Chile",
+      "anio": 2020,
+      "total_incendios": 54807,
+      "frp_promedio": 18.2,
+      "brillo_promedio": 330.5
+    },
+    {
+      "pais": "Colombia",
+      "anio": 2020,
+      "total_incendios": 297040,
+      "frp_promedio": 13.6,
+      "brillo_promedio": 336.0
+    },
+    {
+      "pais": "Ecuador",
+      "anio": 2020,
+      "total_incendios": 47473,
+      "frp_promedio": 10.1,
+      "brillo_promedio": 336.8
+    },
+    {
+      "pais": "Guyana",
+      "anio": 2020,
+      "total_incendios": 19909,
+      "frp_promedio": 8.2,
+      "brillo_promedio": 334.9
+    },
+    {
+      "pais": "Paraguay",
+      "anio": 2020,
+      "total_incendios": 484841,
+      "frp_promedio": 20.2,
+      "brillo_promedio": 335.5
+    },
+    {
+      "pais": "Peru",
+      "anio": 2020,
+      "total_incendios": 197000,
+      "frp_promedio": 11.5,
+      "brillo_promedio": 336.1
+    },
+    {
+      "pais": "Suriname",
+      "anio": 2020,
+      "total_incendios": 6175,
+      "frp_promedio": 8.8,
+      "brillo_promedio": 333.9
+    },
+    {
+      "pais": "Uruguay",
+      "anio": 2020,
+      "total_incendios": 11523,
+      "frp_promedio": 9.5,
+      "brillo_promedio": 333.8
+    },
+    {
+      "pais": "Venezuela",
+      "anio": 2020,
+      "total_incendios": 399946,
+      "frp_promedio": 15.5,
+      "brillo_promedio": 335.0
+    },
+    {
+      "pais": "Argentina",
+      "anio": 2021,
+      "total_incendios": 217374,
+      "frp_promedio": 25.3,
+      "brillo_promedio": 334.4
+    },
+    {
+      "pais": "Bolivia",
+      "anio": 2021,
+      "total_incendios": 329044,
+      "frp_promedio": 27.1,
+      "brillo_promedio": 332.4
+    },
+    {
+      "pais": "Brazil",
+      "anio": 2021,
+      "total_incendios": 1425302,
+      "frp_promedio": 26.1,
+      "brillo_promedio": 334.0
+    },
+    {
+      "pais": "Chile",
+      "anio": 2021,
+      "total_incendios": 26434,
+      "frp_promedio": 22.2,
+      "brillo_promedio": 331.2
+    },
+    {
+      "pais": "Colombia",
+      "anio": 2021,
+      "total_incendios": 96005,
+      "frp_promedio": 15.3,
+      "brillo_promedio": 334.7
+    },
+    {
+      "pais": "Ecuador",
+      "anio": 2021,
+      "total_incendios": 12564,
+      "frp_promedio": 11.4,
+      "brillo_promedio": 335.0
+    },
+    {
+      "pais": "Guyana",
+      "anio": 2021,
+      "total_incendios": 4848,
+      "frp_promedio": 8.0,
+      "brillo_promedio": 334.4
+    },
+    {
+      "pais": "Paraguay",
+      "anio": 2021,
+      "total_incendios": 177680,
+      "frp_promedio": 26.7,
+      "brillo_promedio": 334.5
+    },
+    {
+      "pais": "Peru",
+      "anio": 2021,
+      "total_incendios": 73228,
+      "frp_promedio": 13.6,
+      "brillo_promedio": 334.7
+    },
+    {
+      "pais": "Suriname",
+      "anio": 2021,
+      "total_incendios": 1145,
+      "frp_promedio": 9.0,
+      "brillo_promedio": 332.7
+    },
+    {
+      "pais": "Uruguay",
+      "anio": 2021,
+      "total_incendios": 3881,
+      "frp_promedio": 22.2,
+      "brillo_promedio": 332.7
+    },
+    {
+      "pais": "Venezuela",
+      "anio": 2021,
+      "total_incendios": 191421,
+      "frp_promedio": 13.2,
+      "brillo_promedio": 334.8
+    },
+    {
+      "pais": "Argentina",
+      "anio": 2022,
+      "total_incendios": 328827,
+      "frp_promedio": 27.7,
+      "brillo_promedio": 335.3
+    },
+    {
+      "pais": "Bolivia",
+      "anio": 2022,
+      "total_incendios": 404615,
+      "frp_promedio": 21.0,
+      "brillo_promedio": 329.6
+    },
+    {
+      "pais": "Brazil",
+      "anio": 2022,
+      "total_incendios": 1567562,
+      "frp_promedio": 22.4,
+      "brillo_promedio": 333.1
+    },
+    {
+      "pais": "Chile",
+      "anio": 2022,
+      "total_incendios": 29499,
+      "frp_promedio": 30.7,
+      "brillo_promedio": 332.2
+    },
+    {
+      "pais": "Colombia",
+      "anio": 2022,
+      "total_incendios": 137604,
+      "frp_promedio": 18.3,
+      "brillo_promedio": 334.3
+    },
+    {
+      "pais": "Ecuador",
+      "anio": 2022,
+      "total_incendios": 36838,
+      "frp_promedio": 29.9,
+      "brillo_promedio": 335.9
+    },
+    {
+      "pais": "Guyana",
+      "anio": 2022,
+      "total_incendios": 4373,
+      "frp_promedio": 8.0,
+      "brillo_promedio": 334.0
+    },
+    {
+      "pais": "Paraguay",
+      "anio": 2022,
+      "total_incendios": 132470,
+      "frp_promedio": 23.5,
+      "brillo_promedio": 334.2
+    },
+    {
+      "pais": "Peru",
+      "anio": 2022,
+      "total_incendios": 97072,
+      "frp_promedio": 14.5,
+      "brillo_promedio": 335.1
+    },
+    {
+      "pais": "Suriname",
+      "anio": 2022,
+      "total_incendios": 1364,
+      "frp_promedio": 8.7,
+      "brillo_promedio": 332.6
+    },
+    {
+      "pais": "Uruguay",
+      "anio": 2022,
+      "total_incendios": 3727,
+      "frp_promedio": 13.6,
+      "brillo_promedio": 332.3
+    },
+    {
+      "pais": "Venezuela",
+      "anio": 2022,
+      "total_incendios": 254326,
+      "frp_promedio": 13.9,
+      "brillo_promedio": 334.1
+    },
+    {
+      "pais": "Argentina",
+      "anio": 2023,
+      "total_incendios": 333149,
+      "frp_promedio": 19.7,
+      "brillo_promedio": 334.1
+    },
+    {
+      "pais": "Bolivia",
+      "anio": 2023,
+      "total_incendios": 736564,
+      "frp_promedio": 17.5,
+      "brillo_promedio": 332.4
+    },
+    {
+      "pais": "Brazil",
+      "anio": 2023,
+      "total_incendios": 2648772,
+      "frp_promedio": 16.0,
+      "brillo_promedio": 333.8
+    },
+    {
+      "pais": "Chile",
+      "anio": 2023,
+      "total_incendios": 107522,
+      "frp_promedio": 38.5,
+      "brillo_promedio": 333.6
+    },
+    {
+      "pais": "Colombia",
+      "anio": 2023,
+      "total_incendios": 200252,
+      "frp_promedio": 11.3,
+      "brillo_promedio": 335.5
+    },
+    {
+      "pais": "Ecuador",
+      "anio": 2023,
+      "total_incendios": 21121,
+      "frp_promedio": 10.0,
+      "brillo_promedio": 333.0
+    },
+    {
+      "pais": "Guyana",
+      "anio": 2023,
+      "total_incendios": 35113,
+      "frp_promedio": 8.4,
+      "brillo_promedio": 335.0
+    },
+    {
+      "pais": "Paraguay",
+      "anio": 2023,
+      "total_incendios": 241631,
+      "frp_promedio": 16.8,
+      "brillo_promedio": 334.9
+    },
+    {
+      "pais": "Peru",
+      "anio": 2023,
+      "total_incendios": 158958,
+      "frp_promedio": 11.3,
+      "brillo_promedio": 335.7
+    },
+    {
+      "pais": "Suriname",
+      "anio": 2023,
+      "total_incendios": 12224,
+      "frp_promedio": 8.7,
+      "brillo_promedio": 333.8
+    },
+    {
+      "pais": "Uruguay",
+      "anio": 2023,
+      "total_incendios": 5534,
+      "frp_promedio": 10.3,
+      "brillo_promedio": 333.6
+    },
+    {
+      "pais": "Venezuela",
+      "anio": 2023,
+      "total_incendios": 557858,
+      "frp_promedio": 11.3,
+      "brillo_promedio": 335.3
+    },
+    {
+      "pais": "Argentina",
+      "anio": 2024,
+      "total_incendios": 285560,
+      "frp_promedio": 9.0,
+      "brillo_promedio": 334.7
+    },
+    {
+      "pais": "Bolivia",
+      "anio": 2024,
+      "total_incendios": 1736671,
+      "frp_promedio": 9.1,
+      "brillo_promedio": 329.4
+    },
+    {
+      "pais": "Brazil",
+      "anio": 2024,
+      "total_incendios": 3607830,
+      "frp_promedio": 10.5,
+      "brillo_promedio": 332.9
+    },
+    {
+      "pais": "Chile",
+      "anio": 2024,
+      "total_incendios": 36458,
+      "frp_promedio": 10.4,
+      "brillo_promedio": 333.4
+    },
+    {
+      "pais": "Colombia",
+      "anio": 2024,
+      "total_incendios": 198664,
+      "frp_promedio": 8.5,
+      "brillo_promedio": 336.6
+    },
+    {
+      "pais": "Ecuador",
+      "anio": 2024,
+      "total_incendios": 59382,
+      "frp_promedio": 8.2,
+      "brillo_promedio": 336.3
+    },
+    {
+      "pais": "Guyana",
+      "anio": 2024,
+      "total_incendios": 54251,
+      "frp_promedio": 6.3,
+      "brillo_promedio": 331.6
+    },
+    {
+      "pais": "Paraguay",
+      "anio": 2024,
+      "total_incendios": 248263,
+      "frp_promedio": 9.4,
+      "brillo_promedio": 334.9
+    },
+    {
+      "pais": "Peru",
+      "anio": 2024,
+      "total_incendios": 191020,
+      "frp_promedio": 9.3,
+      "brillo_promedio": 336.3
+    },
+    {
+      "pais": "Suriname",
+      "anio": 2024,
+      "total_incendios": 14416,
+      "frp_promedio": 7.5,
+      "brillo_promedio": 333.3
+    },
+    {
+      "pais": "Uruguay",
+      "anio": 2024,
+      "total_incendios": 2749,
+      "frp_promedio": 5.5,
+      "brillo_promedio": 333.0
+    },
+    {
+      "pais": "Venezuela",
+      "anio": 2024,
+      "total_incendios": 746195,
+      "frp_promedio": 7.7,
+      "brillo_promedio": 335.0
+    },
+    {
+      "pais": "Argentina",
+      "anio": 2025,
+      "total_incendios": 342388,
+      "frp_promedio": 17.1,
+      "brillo_promedio": 333.9
+    },
+    {
+      "pais": "Bolivia",
+      "anio": 2025,
+      "total_incendios": 291821,
+      "frp_promedio": 14.6,
+      "brillo_promedio": 331.5
+    },
+    {
+      "pais": "Brazil",
+      "anio": 2025,
+      "total_incendios": 1708449,
+      "frp_promedio": 15.8,
+      "brillo_promedio": 333.5
+    },
+    {
+      "pais": "Chile",
+      "anio": 2025,
+      "total_incendios": 47562,
+      "frp_promedio": 22.2,
+      "brillo_promedio": 333.9
+    },
+    {
+      "pais": "Colombia",
+      "anio": 2025,
+      "total_incendios": 166704,
+      "frp_promedio": 11.1,
+      "brillo_promedio": 335.1
+    },
+    {
+      "pais": "Ecuador",
+      "anio": 2025,
+      "total_incendios": 28913,
+      "frp_promedio": 8.3,
+      "brillo_promedio": 335.7
+    },
+    {
+      "pais": "Guyana",
+      "anio": 2025,
+      "total_incendios": 18023,
+      "frp_promedio": 7.7,
+      "brillo_promedio": 334.8
+    },
+    {
+      "pais": "Paraguay",
+      "anio": 2025,
+      "total_incendios": 146906,
+      "frp_promedio": 13.0,
+      "brillo_promedio": 334.0
+    },
+    {
+      "pais": "Peru",
+      "anio": 2025,
+      "total_incendios": 106486,
+      "frp_promedio": 10.0,
+      "brillo_promedio": 335.6
+    },
+    {
+      "pais": "Suriname",
+      "anio": 2025,
+      "total_incendios": 4106,
+      "frp_promedio": 7.9,
+      "brillo_promedio": 333.8
+    },
+    {
+      "pais": "Uruguay",
+      "anio": 2025,
+      "total_incendios": 6426,
+      "frp_promedio": 7.7,
+      "brillo_promedio": 333.0
+    },
+    {
+      "pais": "Venezuela",
+      "anio": 2025,
+      "total_incendios": 470455,
+      "frp_promedio": 10.9,
+      "brillo_promedio": 334.8
+    }
+  ]
+}
